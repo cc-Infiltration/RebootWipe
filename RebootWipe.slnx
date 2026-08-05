@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="RebootWipe/RebootWipe.vcxproj" Id="7e34601b-fbb8-4292-bf23-9f421f182fab" />
+</Solution>
