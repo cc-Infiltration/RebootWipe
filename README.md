@@ -1,6 +1,6 @@
 # RebootWipe
 
-**Language:** C · **Platform:** Windows · **License:** MIT
+**Language:** C · **Platform:** Windows · **License:** GPL-3.0
 
 一个基于 C 语言的 Windows 重启文件操作管理器，用于管理 `PendingFileRenameOperations` 注册表项。
 
@@ -112,9 +112,20 @@ RebootWipe/
 │   └── RebootWipe.vcxproj.user
 ├── RebootWipe.slnx               # 解决方案文件
 ├── .gitignore
+├── LICENSE
 └── README.md
 ```
 
 ## 许可证
 
-MIT License
+GNU General Public License v3.0 (GPL-3.0)
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
