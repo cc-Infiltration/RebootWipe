@@ -34,6 +34,10 @@
 /* 路径长度限制 */
 #define MAX_PATH_LEN       260
 
+/* 控制台颜色（使用 Windows API 设置） */
+#define CONSOLE_RED    FOREGROUND_RED | FOREGROUND_INTENSITY
+#define CONSOLE_NORMAL FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE
+
 /* 跳过前缀 */
 #define SKIP_PREFIX        L"??"
 #define SKIP_PREFIX_LEN    2
@@ -65,20 +69,94 @@ typedef struct {
 } PendingOperation;
 
 /* ============================================================
+ * 控制台颜色辅助函数
+ * ============================================================ */
+
+static WORD g_originalAttrs = 0;
+
+static void SetConsoleColor(WORD attr)
+{
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    SetConsoleTextAttribute(hOut, attr);
+}
+
+static void SaveConsoleColor(void)
+{
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    CONSOLE_SCREEN_BUFFER_INFO info;
+    GetConsoleScreenBufferInfo(hOut, &info);
+    g_originalAttrs = info.wAttributes;
+}
+
+static void ResetConsoleColor(void)
+{
+    SetConsoleColor(g_originalAttrs);
+}
+
+/* 红色输出宏：设置红色 -> 输出 -> 恢复原色 */
+#define WPRINTF_RED(fmt, ...) do { \
+    SetConsoleColor(CONSOLE_RED); \
+    wprintf(fmt, __VA_ARGS__); \
+    ResetConsoleColor(); \
+} while(0)
+
+#define WPRINTF_RED0(fmt) do { \
+    SetConsoleColor(CONSOLE_RED); \
+    wprintf(fmt); \
+    ResetConsoleColor(); \
+} while(0)
+
+/* ============================================================
  * 第一层：底层 API 封装层
  * ============================================================ */
 
 /**
- * 打开注册表键（兼容 WOW64 重定向，确保访问 64 位注册表视图）
+ * 打开注册表键（含 WOW64 回退机制）
+ * 优先使用 KEY_WOW64_64KEY 访问 64 位视图，失败则回退到不带标志的方式
  * @param access 访问权限（KEY_READ / KEY_WRITE）
  * @param hKey   输出参数，返回注册表句柄
  * @return 成功返回 ERROR_SUCCESS
  */
 static LONG RW_OpenRegKey(REGSAM access, HKEY* hKey)
 {
-    /* 合并 WOW64 标志，避免 32 位进程在 64 位系统上被重定向到 Wow6432Node */
-    return RegOpenKeyExW(HKEY_LOCAL_MACHINE, REG_KEY_PATH, 0,
-                         access | REG_WOW64_FLAG, hKey);
+    LONG result;
+
+    /* 第一优先级：使用 WOW64 标志访问 64 位注册表视图 */
+    result = RegOpenKeyExW(HKEY_LOCAL_MACHINE, REG_KEY_PATH, 0,
+                           access | REG_WOW64_FLAG, hKey);
+    if (result == ERROR_SUCCESS) {
+        return ERROR_SUCCESS;
+    }
+
+    /* 回退：不带 WOW64 标志（适用于 32 位系统或旧系统） */
+    result = RegOpenKeyExW(HKEY_LOCAL_MACHINE, REG_KEY_PATH, 0,
+                           access, hKey);
+    return result;
+}
+
+/**
+ * 打开或创建注册表键（含 WOW64 回退机制）
+ * 用于写入场景，若键不存在则自动创建
+ * @param access 访问权限（KEY_WRITE）
+ * @param hKey   输出参数，返回注册表句柄
+ * @return 成功返回 ERROR_SUCCESS
+ */
+static LONG RW_CreateRegKey(REGSAM access, HKEY* hKey)
+{
+    LONG result;
+    DWORD disposition;
+
+    /* 第一优先级：使用 WOW64 标志打开或创建 64 位注册表视图 */
+    result = RegCreateKeyExW(HKEY_LOCAL_MACHINE, REG_KEY_PATH, 0, NULL, 0,
+                             access | REG_WOW64_FLAG, NULL, hKey, &disposition);
+    if (result == ERROR_SUCCESS) {
+        return ERROR_SUCCESS;
+    }
+
+    /* 回退：不带 WOW64 标志 */
+    result = RegCreateKeyExW(HKEY_LOCAL_MACHINE, REG_KEY_PATH, 0, NULL, 0,
+                             access, NULL, hKey, &disposition);
+    return result;
 }
 
 /**
@@ -136,29 +214,69 @@ static LONG ReadRegistryData(BYTE** buffer, DWORD* size)
 }
 
 /**
- * 写入 PendingFileRenameOperations 数据
+ * 写入 PendingFileRenameOperations 数据（含写入后验证）
  * @param buffer 数据缓冲区
  * @param size   数据大小（字节）
- * @return 成功返回 ERROR_SUCCESS
+ * @return 成功返回 ERROR_SUCCESS，验证失败返回 ERROR_INTERNAL_ERROR
  */
 static LONG WriteRegistryData(const BYTE* buffer, DWORD size)
 {
     HKEY hKey = NULL;
     LONG result;
 
-    result = RW_OpenRegKey(KEY_WRITE, &hKey);
+    result = RW_CreateRegKey(KEY_WRITE, &hKey);
     if (result != ERROR_SUCCESS) {
+        if (result == ERROR_ACCESS_DENIED) {
+            WPRINTF_RED0(L"[错误] 权限不足：请以管理员身份运行本程序。\n");
+        } else if (result == ERROR_FILE_NOT_FOUND || result == ERROR_NO_MORE_ITEMS) {
+            WPRINTF_RED0(L"[错误] 注册表路径不存在，且无法创建（可能被杀软拦截）。\n");
+        } else {
+            WPRINTF_RED(L"[错误] 打开注册表失败，错误码：%lu\n", result);
+        }
         return result;
     }
 
     if (size == 0) {
-        /* 数据为空，删除注册表值 */
         result = RegDeleteValueW(hKey, REG_VALUE_NAME);
     } else {
         result = RegSetValueExW(hKey, REG_VALUE_NAME, 0, REG_MULTI_SZ, buffer, size);
     }
 
     RegCloseKey(hKey);
+
+    /* 写入后验证：立即读回数据确认写入成功 */
+    if (result == ERROR_SUCCESS) {
+        BYTE* verifyBuf = NULL;
+        DWORD verifySize = 0;
+        result = ReadRegistryData(&verifyBuf, &verifySize);
+        if (result == ERROR_SUCCESS) {
+            if (verifySize != size || memcmp(verifyBuf, buffer, size) != 0) {
+                free(verifyBuf);
+                WPRINTF_RED0(L"[错误] 写入验证失败：数据不匹配（可能被杀软拦截）。\n");
+                return ERROR_INTERNAL_ERROR;
+            }
+            free(verifyBuf);
+        } else if (size == 0 && result == ERROR_FILE_NOT_FOUND) {
+            /* 删除操作验证通过 */
+        } else {
+            WPRINTF_RED(L"[错误] 写入验证失败：无法读回数据（错误码：%lu）\n", result);
+            return result;
+        }
+    } else {
+        /* 写入失败，分析原因 */
+        if (result == ERROR_ACCESS_DENIED) {
+            WPRINTF_RED0(L"[错误] 写入被拒绝：可能是权限不足或被杀软拦截。\n");
+            wprintf(L"       建议：以管理员身份运行，并将本程序加入杀软白名单。\n");
+        } else if (result == ERROR_SHARING_VIOLATION) {
+            WPRINTF_RED0(L"[错误] 写入失败：注册表正被其他进程占用。\n");
+            wprintf(L"       请关闭相关程序后重试。\n");
+        } else if (result == ERROR_NOT_ENOUGH_MEMORY) {
+            WPRINTF_RED0(L"[错误] 写入失败：系统内存不足。\n");
+        } else {
+            WPRINTF_RED(L"[错误] 写入失败，错误码：%lu\n", result);
+        }
+    }
+
     return result;
 }
 
@@ -554,7 +672,7 @@ static int ShowPendingList(void)
         return 0;
     }
     if (result != ERROR_SUCCESS) {
-        wprintf(L"[错误] 读取注册表失败，错误码：%lu\n", result);
+        WPRINTF_RED(L"[错误] 读取注册表失败，错误码：%lu\n", result);
         return -1;
     }
 
@@ -562,7 +680,7 @@ static int ShowPendingList(void)
     free(data);
 
     if (result != ERROR_SUCCESS) {
-        wprintf(L"[错误] 解析数据失败。\n");
+        WPRINTF_RED0(L"[错误] 解析数据失败。\n");
         return -1;
     }
 
@@ -615,7 +733,7 @@ static LONG AddToDeleteList(const wchar_t* filePath)
     LONG result;
 
     if (filePath == NULL || *filePath == L'\0') {
-        wprintf(L"[错误] 文件路径不能为空。\n");
+        WPRINTF_RED0(L"[错误] 文件路径不能为空。\n");
         return ERROR_INVALID_PARAMETER;
     }
 
@@ -623,9 +741,9 @@ static LONG AddToDeleteList(const wchar_t* filePath)
     result = MoveFileExW(filePath, NULL, MOVEFILE_DELAY_UNTIL_REBOOT);
     if (result == 0) {
         result = GetLastError();
-        wprintf(L"[错误] 添加失败，错误码：%lu\n", result);
+        WPRINTF_RED(L"[错误] 添加失败，错误码：%lu\n", result);
         if (result == ERROR_ACCESS_DENIED) {
-            wprintf(L"       请确保以管理员身份运行本程序。\n");
+            WPRINTF_RED0(L"       请确保以管理员身份运行本程序。\n");
         }
         return result;
     }
@@ -651,7 +769,7 @@ static LONG RemoveOperation(int index, RemoveMode mode)
     wchar_t* backupPath = NULL;
 
     if (index < 1) {
-        wprintf(L"[错误] 索引必须大于等于 1。\n");
+        WPRINTF_RED0(L"[错误] 索引必须大于等于 1。\n");
         return ERROR_INVALID_PARAMETER;
     }
 
@@ -659,8 +777,12 @@ static LONG RemoveOperation(int index, RemoveMode mode)
 
     /* 读取当前数据 */
     result = ReadRegistryData(&data, &size);
+    if (result == ERROR_FILE_NOT_FOUND) {
+        wprintf(L"[信息] 当前没有待处理的操作。\n");
+        return ERROR_FILE_NOT_FOUND;
+    }
     if (result != ERROR_SUCCESS) {
-        wprintf(L"[错误] 读取注册表失败，错误码：%lu\n", result);
+        WPRINTF_RED(L"[错误] 读取注册表失败，错误码：%lu\n", result);
         return result;
     }
 
@@ -668,7 +790,7 @@ static LONG RemoveOperation(int index, RemoveMode mode)
     result = ParseMultiSzData(data, size, &ops, &count);
     if (result != ERROR_SUCCESS) {
         free(data);
-        wprintf(L"[错误] 解析数据失败。\n");
+        WPRINTF_RED0(L"[错误] 解析数据失败。\n");
         return result;
     }
 
@@ -676,7 +798,7 @@ static LONG RemoveOperation(int index, RemoveMode mode)
     if (targetIdx >= count) {
         free(data);
         free(ops);
-        wprintf(L"[错误] 索引 %d 超出范围（共 %d 项）。\n", index, count);
+        WPRINTF_RED(L"[错误] 索引 %d 超出范围（共 %d 项）。\n", index, count);
         return ERROR_INVALID_PARAMETER;
     }
 
@@ -695,7 +817,7 @@ static LONG RemoveOperation(int index, RemoveMode mode)
         if (result == ERROR_SUCCESS) {
             wprintf(L"[安全] 备份已保存至：%s\n", backupPath);
         } else {
-            wprintf(L"[警告] 备份失败，继续执行...\n");
+            WPRINTF_RED0(L"[警告] 备份失败，继续执行...\n");
         }
     }
 
@@ -714,7 +836,7 @@ static LONG RemoveOperation(int index, RemoveMode mode)
     if (result == ERROR_SUCCESS) {
         wprintf(L"[成功] 操作已完成。\n");
     } else {
-        wprintf(L"[错误] 操作失败，错误码：%lu\n", result);
+        WPRINTF_RED(L"[错误] 操作失败，错误码：%lu\n", result);
     }
 
     return result;
@@ -763,7 +885,7 @@ static void HandleAdd(void)
     wprintf(L"  请输入文件路径: ");
 
     if (fgetws(path, MAX_PATH_LEN, stdin) == NULL) {
-        wprintf(L"[错误] 读取输入失败。\n");
+        WPRINTF_RED0(L"[错误] 读取输入失败。\n");
         return;
     }
 
@@ -774,7 +896,7 @@ static void HandleAdd(void)
     }
 
     if (path[0] == L'\0') {
-        wprintf(L"[错误] 路径不能为空。\n");
+        WPRINTF_RED0(L"[错误] 路径不能为空。\n");
         return;
     }
 
@@ -798,7 +920,7 @@ static void HandleRemove(RemoveMode mode)
     wprintf(L"  请输入要取消的操作序号 (0 返回): ");
 
     if (fgetws(input, 32, stdin) == NULL) {
-        wprintf(L"[错误] 读取输入失败。\n");
+        WPRINTF_RED0(L"[错误] 读取输入失败。\n");
         return;
     }
 
@@ -808,7 +930,7 @@ static void HandleRemove(RemoveMode mode)
         return;
     }
     if (index < 0) {
-        wprintf(L"[错误] 无效的序号。\n");
+        WPRINTF_RED0(L"[错误] 无效的序号。\n");
         return;
     }
 
@@ -854,47 +976,47 @@ static int ParseCommand(int argc, wchar_t* argv[])
 
     if (_wcsicmp(argv[1], L"add") == 0) {
         if (argc < 3) {
-            wprintf(L"[错误] 缺少文件路径参数。\n");
+            WPRINTF_RED0(L"[错误] 缺少文件路径参数。\n");
             wprintf(L"用法：%s add <文件路径>\n", argv[0]);
             return -1;
         }
         AddToDeleteList(argv[2]);
-        return 1;
+        return 0;
     }
 
     if (_wcsicmp(argv[1], L"skip") == 0) {
         int index;
         if (argc < 3) {
-            wprintf(L"[错误] 缺少序号参数。\n");
+            WPRINTF_RED0(L"[错误] 缺少序号参数。\n");
             wprintf(L"用法：%s skip <序号>\n", argv[0]);
             return -1;
         }
         index = _wtoi(argv[2]);
         if (index <= 0) {
-            wprintf(L"[错误] 序号必须为正整数。\n");
+            WPRINTF_RED0(L"[错误] 序号必须为正整数。\n");
             return -1;
         }
         RemoveOperation(index, MODE_SKIP);
-        return 1;
+        return 0;
     }
 
     if (_wcsicmp(argv[1], L"erase") == 0) {
         int index;
         if (argc < 3) {
-            wprintf(L"[错误] 缺少序号参数。\n");
+            WPRINTF_RED0(L"[错误] 缺少序号参数。\n");
             wprintf(L"用法：%s erase <序号>\n", argv[0]);
             return -1;
         }
         index = _wtoi(argv[2]);
         if (index <= 0) {
-            wprintf(L"[错误] 序号必须为正整数。\n");
+            WPRINTF_RED0(L"[错误] 序号必须为正整数。\n");
             return -1;
         }
         RemoveOperation(index, MODE_ERASE);
-        return 1;
+        return 0;
     }
 
-    wprintf(L"[错误] 未知命令：%s\n", argv[1]);
+    WPRINTF_RED(L"[错误] 未知命令：%s\n", argv[1]);
     ShowHelp(argv[0]);
     return -1;
 }
@@ -914,13 +1036,14 @@ int wmain(int argc, wchar_t* argv[])
     _setmode(_fileno(stdin), _O_U16TEXT);
     _setmode(_fileno(stderr), _O_U16TEXT);
 
+    /* 保存原始控制台颜色，用于错误输出后恢复 */
+    SaveConsoleColor();
+
     /* 命令行模式 */
     if (argc > 1) {
         result = ParseCommand(argc, argv);
         return result < 0 ? 1 : 0;
     }
-
-    /* 交互式模式 */
     while (1) {
         ShowMenu();
 
