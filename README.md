@@ -1,8 +1,6 @@
 # RebootWipe
 
-[![Language](https://img.shields.io/badge/language-C-blue.svg)](https://github.com/cc-Infiltration/RebootWipe)
-[![Platform](https://img.shields.io/badge/platform-Windows-lightgray.svg)](https://github.com/cc-Infiltration/RebootWipe)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
+**Language:** C · **Platform:** Windows · **License:** MIT
 
 一个基于 C 语言的 Windows 重启文件操作管理器，用于管理 `PendingFileRenameOperations` 注册表项。
 
