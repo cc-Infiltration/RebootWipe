@@ -724,6 +724,39 @@ static int ShowPendingList(void)
 }
 
 /**
+ * 去除路径首尾的引号和空白字符（用户可能用引号包裹路径）
+ * @param str 输入字符串
+ * @return 指向有效内容的指针（在原字符串上修改）
+ */
+static wchar_t* TrimPath(wchar_t* str)
+{
+    wchar_t* start;
+    wchar_t* end;
+
+    if (str == NULL) return NULL;
+
+    /* 跳过首部空白和引号 */
+    start = str;
+    while (*start == L' ' || *start == L'\t' || *start == L'"') {
+        start++;
+    }
+
+    /* 找到尾部有效字符 */
+    end = start + wcslen(start) - 1;
+    while (end > start && (*end == L' ' || *end == L'\t' || *end == L'"')) {
+        *end = L'\0';
+        end--;
+    }
+
+    /* 如果首部有引号，需要移动整个字符串 */
+    if (start != str) {
+        wcscpy_s(str, wcslen(str) + 1, start);
+    }
+
+    return str;
+}
+
+/**
  * 将文件添加到重启删除列表
  * @param filePath 文件路径
  * @return 成功返回 ERROR_SUCCESS
@@ -731,19 +764,32 @@ static int ShowPendingList(void)
 static LONG AddToDeleteList(const wchar_t* filePath)
 {
     LONG result;
+    wchar_t* cleanPath;
 
     if (filePath == NULL || *filePath == L'\0') {
         WPRINTF_RED0(L"[错误] 文件路径不能为空。\n");
         return ERROR_INVALID_PARAMETER;
     }
 
+    /* 去除首尾引号和空白，复制到可变缓冲区 */
+    cleanPath = (wchar_t*)malloc((wcslen(filePath) + 1) * sizeof(wchar_t));
+    if (cleanPath == NULL) {
+        return ERROR_OUTOFMEMORY;
+    }
+    wcscpy_s(cleanPath, wcslen(filePath) + 1, filePath);
+    TrimPath(cleanPath);
+
     /* 使用官方 API */
-    result = MoveFileExW(filePath, NULL, MOVEFILE_DELAY_UNTIL_REBOOT);
+    result = MoveFileExW(cleanPath, NULL, MOVEFILE_DELAY_UNTIL_REBOOT);
+    free(cleanPath);
+
     if (result == 0) {
         result = GetLastError();
         WPRINTF_RED(L"[错误] 添加失败，错误码：%lu\n", result);
         if (result == ERROR_ACCESS_DENIED) {
             WPRINTF_RED0(L"       请确保以管理员身份运行本程序。\n");
+        } else if (result == ERROR_FILE_NOT_FOUND) {
+            WPRINTF_RED0(L"       文件不存在，请检查路径是否正确。\n");
         }
         return result;
     }
@@ -779,7 +825,7 @@ static LONG RemoveOperation(int index, RemoveMode mode)
     result = ReadRegistryData(&data, &size);
     if (result == ERROR_FILE_NOT_FOUND) {
         wprintf(L"[信息] 当前没有待处理的操作。\n");
-        return ERROR_FILE_NOT_FOUND;
+        return ERROR_SUCCESS;
     }
     if (result != ERROR_SUCCESS) {
         WPRINTF_RED(L"[错误] 读取注册表失败，错误码：%lu\n", result);
@@ -970,8 +1016,7 @@ static int ParseCommand(int argc, wchar_t* argv[])
     }
 
     if (_wcsicmp(argv[1], L"read") == 0) {
-        ShowPendingList();
-        return 1;
+        return ShowPendingList() < 0 ? -1 : 0;
     }
 
     if (_wcsicmp(argv[1], L"add") == 0) {
@@ -980,7 +1025,9 @@ static int ParseCommand(int argc, wchar_t* argv[])
             wprintf(L"用法：%s add <文件路径>\n", argv[0]);
             return -1;
         }
-        AddToDeleteList(argv[2]);
+        if (AddToDeleteList(argv[2]) != ERROR_SUCCESS) {
+            return -1;
+        }
         return 0;
     }
 
@@ -996,7 +1043,9 @@ static int ParseCommand(int argc, wchar_t* argv[])
             WPRINTF_RED0(L"[错误] 序号必须为正整数。\n");
             return -1;
         }
-        RemoveOperation(index, MODE_SKIP);
+        if (RemoveOperation(index, MODE_SKIP) != ERROR_SUCCESS) {
+            return -1;
+        }
         return 0;
     }
 
@@ -1012,7 +1061,9 @@ static int ParseCommand(int argc, wchar_t* argv[])
             WPRINTF_RED0(L"[错误] 序号必须为正整数。\n");
             return -1;
         }
-        RemoveOperation(index, MODE_ERASE);
+        if (RemoveOperation(index, MODE_ERASE) != ERROR_SUCCESS) {
+            return -1;
+        }
         return 0;
     }
 
