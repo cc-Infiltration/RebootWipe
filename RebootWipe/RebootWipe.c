@@ -35,6 +35,15 @@
 /* 路径长度限制 */
 #define MAX_PATH_LEN       260
 
+/* 带前缀 \\?\ 时 MoveFileExW 支持的最大路径长度（官方文档） */
+#define MAX_LONG_PATH_LEN  32767
+
+/* 多路径输入缓冲区最大长度（宽字符数） */
+#define MAX_INPUT_LEN      8192
+
+/* 分号分隔模式下最多解析的路径数 */
+#define MAX_BATCH_PATHS    256
+
 /* 控制台颜色（使用 Windows API 设置） */
 #define CONSOLE_RED    FOREGROUND_RED | FOREGROUND_INTENSITY
 #define CONSOLE_NORMAL FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE
@@ -909,6 +918,414 @@ static LONG AddToDeleteList(const wchar_t* filePath)
 }
 
 /**
+ * 从文本文件读取路径列表（每行一个路径）
+ * 支持注释行（# 开头）和空行跳过，自动去除首尾空白和引号
+ * @param filePath  文本文件路径
+ * @param paths     输出参数，路径指针数组（调用者负责 free 每个元素和数组本身）
+ * @param count     输出参数，路径数量
+ * @return 成功返回 ERROR_SUCCESS
+ */
+static LONG ReadPathsFromFile(const wchar_t* filePath, wchar_t*** paths, int* count)
+{
+    FILE* fp = NULL;
+    errno_t err;
+    wchar_t line[MAX_LONG_PATH_LEN];
+    wchar_t** arr = NULL;
+    int arrCount = 0;
+    int capacity = 16;
+    size_t i;
+
+    *paths = NULL;
+    *count = 0;
+
+    err = _wfopen_s(&fp, filePath, L"r, ccs=UTF-8");
+    if (err != 0 || fp == NULL) {
+        return ERROR_FILE_NOT_FOUND;
+    }
+
+    arr = (wchar_t**)malloc(capacity * sizeof(wchar_t*));
+    if (arr == NULL) {
+        fclose(fp);
+        return ERROR_OUTOFMEMORY;
+    }
+
+    while (fgetws(line, MAX_LONG_PATH_LEN, fp) != NULL) {
+        wchar_t* trimmed;
+        size_t len;
+
+        /* 移除换行符 */
+        len = wcslen(line);
+        while (len > 0 && (line[len - 1] == L'\n' || line[len - 1] == L'\r')) {
+            line[--len] = L'\0';
+        }
+
+        /* 跳过空行 */
+        if (len == 0) continue;
+
+        /* 跳过注释行（# 开头） */
+        if (line[0] == L'#') continue;
+
+        /* 复制并去除首尾空白和引号 */
+        trimmed = (wchar_t*)malloc((wcslen(line) + 1) * sizeof(wchar_t));
+        if (trimmed == NULL) {
+            for (i = 0; i < (size_t)arrCount; i++) free(arr[i]);
+            free(arr);
+            fclose(fp);
+            return ERROR_OUTOFMEMORY;
+        }
+        wcscpy_s(trimmed, wcslen(line) + 1, line);
+        TrimPath(trimmed);
+
+        /* 跳过 trim 后为空的行 */
+        if (trimmed[0] == L'\0') {
+            free(trimmed);
+            continue;
+        }
+
+        /* 扩容 */
+        if (arrCount >= capacity) {
+            wchar_t** newArr;
+            capacity *= 2;
+            newArr = (wchar_t**)realloc(arr, capacity * sizeof(wchar_t*));
+            if (newArr == NULL) {
+                free(trimmed);
+                for (i = 0; i < (size_t)arrCount; i++) free(arr[i]);
+                free(arr);
+                fclose(fp);
+                return ERROR_OUTOFMEMORY;
+            }
+            arr = newArr;
+        }
+
+        arr[arrCount++] = trimmed;
+    }
+
+    fclose(fp);
+    *paths = arr;
+    *count = arrCount;
+    return ERROR_SUCCESS;
+}
+
+/**
+ * 批量添加文件到重启删除列表
+ * 根据微软官方文档，多次调用 MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT)
+ * 会按调用顺序依次追加到 PendingFileRenameOperations 注册表项，
+ * 系统在重启时按相同顺序执行删除/移动操作。
+ *
+ * 注意（官方文档）：
+ *   - 操作在重启时按调用顺序执行。若要删除含文件的目录，
+ *     必须先在列表中删除目录内的文件，再删除目录本身。
+ *   - 路径默认限制 MAX_PATH(260) 字符；超过时需加 \\?\ 前缀，
+ *     可扩展至 32767 宽字符。
+ *   - 远程共享路径不支持 MOVEFILE_DELAY_UNTIL_REBOOT。
+ *
+ * @param paths  路径指针数组
+ * @param count  路径数量
+ * @return 成功添加的数量
+ */
+static int AddMultipleToDeleteList(const wchar_t* const* paths, int count)
+{
+    int i;
+    int success = 0;
+    int failure = 0;
+
+    if (paths == NULL || count <= 0) return 0;
+
+    wprintf(L"\n--- 批量添加重启删除任务（共 %d 项）---\n\n", count);
+
+    for (i = 0; i < count; i++) {
+        wprintf(L"[%d/%d] ", i + 1, count);
+        if (AddToDeleteList(paths[i]) == ERROR_SUCCESS) {
+            success++;
+        } else {
+            failure++;
+        }
+    }
+
+    wprintf(L"\n");
+    wprintf(L"================================================================\n");
+    wprintf(L"  批量添加完成：成功 %d 项，失败 %d 项\n", success, failure);
+    wprintf(L"================================================================\n");
+
+    return success;
+}
+
+/* ============================================================
+ * 目录递归展开功能
+ * ============================================================ */
+
+/**
+ * 检查路径是否为目录
+ * @param path 文件路径
+ * @return TRUE 如果是目录，FALSE 否则
+ */
+static BOOL IsDirectoryPath(const wchar_t* path)
+{
+    DWORD attrs = GetFileAttributesW(path);
+    if (attrs == INVALID_FILE_ATTRIBUTES) return FALSE;
+    return (attrs & FILE_ATTRIBUTE_DIRECTORY) ? TRUE : FALSE;
+}
+
+/**
+ * 检查目录是否非空
+ * @param dirPath 目录路径
+ * @return TRUE 如果目录非空，FALSE 如果为空或无法访问
+ */
+static BOOL IsDirectoryNonEmpty(const wchar_t* dirPath)
+{
+    WIN32_FIND_DATAW findData;
+    HANDLE hFind;
+    wchar_t* searchPath;
+    BOOL nonEmpty = FALSE;
+
+    searchPath = (wchar_t*)malloc(MAX_LONG_PATH_LEN * sizeof(wchar_t));
+    if (searchPath == NULL) return FALSE;
+
+    swprintf_s(searchPath, MAX_LONG_PATH_LEN, L"%s\\*", dirPath);
+    hFind = FindFirstFileW(searchPath, &findData);
+    free(searchPath);
+
+    if (hFind == INVALID_HANDLE_VALUE) return FALSE;
+
+    do {
+        if (wcscmp(findData.cFileName, L".") != 0 &&
+            wcscmp(findData.cFileName, L"..") != 0) {
+            nonEmpty = TRUE;
+            break;
+        }
+    } while (FindNextFileW(hFind, &findData));
+
+    FindClose(hFind);
+    return nonEmpty;
+}
+
+/**
+ * 向路径数组中添加一个路径（自动扩容）
+ * @param paths     路径数组指针（会被更新）
+ * @param count     路径数量指针（会被更新）
+ * @param capacity  数组容量指针（会被更新）
+ * @param path      要添加的路径（会被复制）
+ * @return 成功返回 ERROR_SUCCESS
+ */
+static LONG AddPathToArray(wchar_t*** paths, int* count, int* capacity,
+                            const wchar_t* path)
+{
+    wchar_t* pathCopy;
+
+    if (*count >= *capacity) {
+        int newCap = (*capacity) * 2;
+        wchar_t** newArr = (wchar_t**)realloc(*paths, newCap * sizeof(wchar_t*));
+        if (newArr == NULL) return ERROR_OUTOFMEMORY;
+        *paths = newArr;
+        *capacity = newCap;
+    }
+
+    pathCopy = _wcsdup(path);
+    if (pathCopy == NULL) return ERROR_OUTOFMEMORY;
+
+    (*paths)[(*count)++] = pathCopy;
+    return ERROR_SUCCESS;
+}
+
+/**
+ * 递归收集目录下所有路径（后序遍历：子项在前，目录本身在后）
+ * 确保重启删除时先删内容再删目录（符合微软官方文档要求）
+ * 跳过重解析点（符号链接、挂载点等）以避免无限循环
+ * @param dirPath    目录路径
+ * @param paths      路径数组指针（会被更新）
+ * @param count      路径数量指针（会被更新）
+ * @param capacity   数组容量指针（会被更新）
+ * @return 成功返回 ERROR_SUCCESS
+ */
+static LONG CollectDirectoryPaths(const wchar_t* dirPath,
+                                   wchar_t*** paths, int* count, int* capacity)
+{
+    WIN32_FIND_DATAW findData;
+    HANDLE hFind;
+    wchar_t* searchPath;
+    wchar_t* fullPath;
+    LONG result;
+
+    searchPath = (wchar_t*)malloc(MAX_LONG_PATH_LEN * sizeof(wchar_t));
+    if (searchPath == NULL) return ERROR_OUTOFMEMORY;
+
+    fullPath = (wchar_t*)malloc(MAX_LONG_PATH_LEN * sizeof(wchar_t));
+    if (fullPath == NULL) {
+        free(searchPath);
+        return ERROR_OUTOFMEMORY;
+    }
+
+    swprintf_s(searchPath, MAX_LONG_PATH_LEN, L"%s\\*", dirPath);
+    hFind = FindFirstFileW(searchPath, &findData);
+
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            /* 跳过 . 和 .. */
+            if (wcscmp(findData.cFileName, L".") == 0 ||
+                wcscmp(findData.cFileName, L"..") == 0) {
+                continue;
+            }
+
+            /* 跳过重解析点（符号链接、挂载点），避免无限循环 */
+            if (findData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+                continue;
+            }
+
+            swprintf_s(fullPath, MAX_LONG_PATH_LEN, L"%s\\%s",
+                       dirPath, findData.cFileName);
+
+            if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                /* 递归处理子目录（后序：先收集子目录内容） */
+                result = CollectDirectoryPaths(fullPath, paths, count, capacity);
+                if (result != ERROR_SUCCESS) {
+                    FindClose(hFind);
+                    free(searchPath);
+                    free(fullPath);
+                    return result;
+                }
+            }
+
+            /* 添加当前路径（文件或已处理完内容的子目录） */
+            result = AddPathToArray(paths, count, capacity, fullPath);
+            if (result != ERROR_SUCCESS) {
+                FindClose(hFind);
+                free(searchPath);
+                free(fullPath);
+                return result;
+            }
+        } while (FindNextFileW(hFind, &findData));
+
+        FindClose(hFind);
+    }
+
+    free(searchPath);
+    free(fullPath);
+
+    /* 最后添加目录本身（后序：所有内容已在前面） */
+    return AddPathToArray(paths, count, capacity, dirPath);
+}
+
+/**
+ * 展开路径列表中的非空目录
+ * 将非空目录递归展开为其内部所有文件/子目录 + 目录本身（后序排列）
+ * 交互模式下对非空目录逐个提示确认
+ * @param inputPaths   用户输入的路径数组
+ * @param inputCount   用户输入的路径数量
+ * @param outPaths     输出参数，展开后的路径数组（调用者负责 free 每个元素和数组）
+ * @param outCount     输出参数，展开后的路径数量
+ * @param interactive  是否为交互模式（TRUE 时对非空目录提示确认）
+ * @return 成功返回 ERROR_SUCCESS
+ */
+static LONG ExpandDirectoryPaths(const wchar_t* const* inputPaths, int inputCount,
+                                  wchar_t*** outPaths, int* outCount,
+                                  BOOL interactive)
+{
+    wchar_t** arr = NULL;
+    int count = 0;
+    int capacity = 16;
+    int i;
+    int dirCount = 0;
+    LONG result;
+
+    *outPaths = NULL;
+    *outCount = 0;
+
+    arr = (wchar_t**)malloc(capacity * sizeof(wchar_t*));
+    if (arr == NULL) return ERROR_OUTOFMEMORY;
+
+    for (i = 0; i < inputCount; i++) {
+        size_t pathLen;
+        wchar_t* cleanPath;
+
+        /* 创建已修剪的路径副本用于目录检测 */
+        pathLen = wcslen(inputPaths[i]);
+        cleanPath = (wchar_t*)malloc((pathLen + 1) * sizeof(wchar_t));
+        if (cleanPath == NULL) {
+            int j;
+            for (j = 0; j < count; j++) free(arr[j]);
+            free(arr);
+            return ERROR_OUTOFMEMORY;
+        }
+        wcscpy_s(cleanPath, pathLen + 1, inputPaths[i]);
+        TrimPath(cleanPath);
+
+        /* 跳过空路径 */
+        if (cleanPath[0] == L'\0') {
+            free(cleanPath);
+            continue;
+        }
+
+        /* 检查是否为非空目录 */
+        if (IsDirectoryPath(cleanPath) && IsDirectoryNonEmpty(cleanPath)) {
+            if (interactive) {
+                wchar_t answer[16];
+                size_t alen;
+
+                wprintf(L"\n[警告] \"%s\" 是非空目录。\n", cleanPath);
+                wprintf(L"       将递归添加目录下所有文件和子目录到重启删除列表。\n");
+                wprintf(L"       确认操作？(y/N): ");
+
+                if (fgetws(answer, 16, stdin) == NULL) {
+                    wprintf(L"[跳过] 已跳过目录：%s\n", cleanPath);
+                    free(cleanPath);
+                    continue;
+                }
+
+                /* 清除输入缓冲区中剩余的字符 */
+                alen = wcslen(answer);
+                if (alen > 0 && answer[alen - 1] != L'\n') {
+                    wint_t ch;
+                    while ((ch = fgetwc(stdin)) != L'\n' && ch != WEOF) { }
+                }
+                while (alen > 0 && (answer[alen - 1] == L'\n' || answer[alen - 1] == L'\r')) {
+                    answer[--alen] = L'\0';
+                }
+
+                if (answer[0] != L'y' && answer[0] != L'Y') {
+                    wprintf(L"[跳过] 已跳过目录：%s\n", cleanPath);
+                    free(cleanPath);
+                    continue;
+                }
+            }
+
+            dirCount++;
+            wprintf(L"[信息] 正在展开目录：%s\n", cleanPath);
+
+            /* 递归收集所有路径（后序排列） */
+            result = CollectDirectoryPaths(cleanPath, &arr, &count, &capacity);
+            free(cleanPath);
+
+            if (result != ERROR_SUCCESS) {
+                int j;
+                for (j = 0; j < count; j++) free(arr[j]);
+                free(arr);
+                return result;
+            }
+        } else {
+            /* 文件或空目录：直接添加 */
+            result = AddPathToArray(&arr, &count, &capacity, cleanPath);
+            free(cleanPath);
+
+            if (result != ERROR_SUCCESS) {
+                int j;
+                for (j = 0; j < count; j++) free(arr[j]);
+                free(arr);
+                return result;
+            }
+        }
+    }
+
+    if (dirCount > 0) {
+        wprintf(L"[信息] 共展开 %d 个非空目录，展开后总计 %d 项路径\n\n",
+                dirCount, count);
+    }
+
+    *outPaths = arr;
+    *outCount = count;
+    return ERROR_SUCCESS;
+}
+
+/**
  * 取消指定的文件操作
  * @param index 操作索引（从 1 开始）
  * @param mode  取消模式（跳过/抹除）
@@ -1036,31 +1453,133 @@ static void HandleView(void)
 
 /**
  * 处理添加操作
+ * 支持单路径、分号分隔的多路径、@文件路径导入、非空目录递归展开
  */
 static void HandleAdd(void)
 {
-    wchar_t path[MAX_PATH_LEN];
+    wchar_t input[MAX_INPUT_LEN];
+    size_t len;
+    wchar_t** inputPaths = NULL;
+    int inputCount = 0;
+    int i;
 
     wprintf(L"\n--- 添加重启删除任务 ---\n\n");
-    wprintf(L"  请输入文件路径: ");
+    wprintf(L"  请输入文件路径：\n");
+    wprintf(L"    · 单个路径直接输入\n");
+    wprintf(L"    · 多个路径用分号 ; 分隔\n");
+    wprintf(L"    · 从文件导入：@文件路径（每行一个路径，# 为注释）\n");
+    wprintf(L"    · 支持目录：非空目录将递归展开并提示确认\n");
+    wprintf(L"  : ");
 
-    if (fgetws(path, MAX_PATH_LEN, stdin) == NULL) {
+    if (fgetws(input, MAX_INPUT_LEN, stdin) == NULL) {
         WPRINTF_RED0(L"[错误] 读取输入失败。\n");
         return;
     }
 
-    /* 移除换行符 */
-    size_t len = wcslen(path);
-    while (len > 0 && (path[len - 1] == L'\n' || path[len - 1] == L'\r')) {
-        path[--len] = L'\0';
+    /* 检查输入是否过长（未以换行符结尾说明缓冲区已满） */
+    len = wcslen(input);
+    if (len > 0 && input[len - 1] != L'\n') {
+        wint_t ch;
+        while ((ch = fgetwc(stdin)) != L'\n' && ch != WEOF) { }
+        WPRINTF_RED0(L"[警告] 输入过长，已截断。\n");
     }
 
-    if (path[0] == L'\0') {
-        WPRINTF_RED0(L"[错误] 路径不能为空。\n");
+    /* 移除换行符 */
+    while (len > 0 && (input[len - 1] == L'\n' || input[len - 1] == L'\r')) {
+        input[--len] = L'\0';
+    }
+
+    if (len == 0) {
+        WPRINTF_RED0(L"[错误] 输入不能为空。\n");
         return;
     }
 
-    AddToDeleteList(path);
+    /* 解析输入路径 */
+    if (input[0] == L'@') {
+        /* 文件导入模式 */
+        wchar_t* filePath = input + 1;
+        LONG result;
+
+        TrimPath(filePath);
+        if (filePath[0] == L'\0') {
+            WPRINTF_RED0(L"[错误] 文件路径不能为空。\n");
+            return;
+        }
+
+        result = ReadPathsFromFile(filePath, &inputPaths, &inputCount);
+        if (result != ERROR_SUCCESS) {
+            WPRINTF_RED(L"[错误] 无法读取文件列表：%s\n", filePath);
+            return;
+        }
+        if (inputCount == 0) {
+            wprintf(L"[信息] 文件列表为空。\n");
+            free(inputPaths);
+            return;
+        }
+    } else {
+        /* 分号分隔的多路径模式 */
+        wchar_t* token;
+        wchar_t* context;
+
+        inputPaths = (wchar_t**)malloc(MAX_BATCH_PATHS * sizeof(wchar_t*));
+        if (inputPaths == NULL) {
+            WPRINTF_RED0(L"[错误] 内存不足。\n");
+            return;
+        }
+
+        token = wcstok_s(input, L";", &context);
+        while (token != NULL && inputCount < MAX_BATCH_PATHS) {
+            if (*token != L'\0') {
+                inputPaths[inputCount] = _wcsdup(token);
+                if (inputPaths[inputCount] == NULL) {
+                    for (i = 0; i < inputCount; i++) free(inputPaths[i]);
+                    free(inputPaths);
+                    WPRINTF_RED0(L"[错误] 内存不足。\n");
+                    return;
+                }
+                inputCount++;
+            }
+            token = wcstok_s(NULL, L";", &context);
+        }
+
+        if (inputCount == 0) {
+            WPRINTF_RED0(L"[错误] 未解析到有效路径。\n");
+            free(inputPaths);
+            return;
+        }
+    }
+
+    /* 展开非空目录（交互模式，提示确认） */
+    {
+        wchar_t** expandedPaths = NULL;
+        int expandedCount = 0;
+        LONG result;
+
+        result = ExpandDirectoryPaths((const wchar_t* const*)inputPaths, inputCount,
+                                       &expandedPaths, &expandedCount, TRUE);
+
+        /* 释放输入路径 */
+        for (i = 0; i < inputCount; i++) free(inputPaths[i]);
+        free(inputPaths);
+
+        if (result != ERROR_SUCCESS) {
+            WPRINTF_RED0(L"[错误] 展开目录失败。\n");
+            return;
+        }
+
+        if (expandedCount == 0) {
+            wprintf(L"[信息] 没有有效的路径需要添加。\n");
+            free(expandedPaths);
+            return;
+        }
+
+        /* 批量添加 */
+        AddMultipleToDeleteList((const wchar_t* const*)expandedPaths, expandedCount);
+
+        /* 释放展开后的路径 */
+        for (i = 0; i < expandedCount; i++) free(expandedPaths[i]);
+        free(expandedPaths);
+    }
 }
 
 /**
@@ -1104,12 +1623,23 @@ static void ShowHelp(const wchar_t* progName)
 {
     wprintf(L"RebootWipe - Windows 重启文件操作管理器\n\n");
     wprintf(L"用法：\n");
-    wprintf(L"  %s              交互式模式\n", progName);
-    wprintf(L"  %s read         查看待处理列表\n", progName);
-    wprintf(L"  %s add <path>   添加文件到重启删除列表\n", progName);
-    wprintf(L"  %s skip <n>     跳过第 n 项操作\n", progName);
-    wprintf(L"  %s erase <n>    抹除第 n 项操作\n", progName);
-    wprintf(L"  %s help         显示帮助\n", progName);
+    wprintf(L"  %s                    交互式模式\n", progName);
+    wprintf(L"  %s read               查看待处理列表\n", progName);
+    wprintf(L"  %s add <路径> [路径...]  添加一个或多个文件/目录到重启删除列表\n", progName);
+    wprintf(L"  %s add @<列表文件>       从文本文件批量导入（每行一个路径，# 注释）\n", progName);
+    wprintf(L"  %s skip <n>           跳过第 n 项操作\n", progName);
+    wprintf(L"  %s erase <n>          抹除第 n 项操作\n", progName);
+    wprintf(L"  %s help               显示帮助\n", progName);
+    wprintf(L"\n");
+    wprintf(L"交互式 add 说明：\n");
+    wprintf(L"  · 单个路径直接输入\n");
+    wprintf(L"  · 多个路径用分号 ; 分隔\n");
+    wprintf(L"  · 从文件导入：@文件路径\n");
+    wprintf(L"  · 支持目录路径：非空目录将递归展开并提示确认\n");
+    wprintf(L"\n");
+    wprintf(L"注意：重启时按输入顺序执行删除。非空目录会自动递归展开，\n");
+    wprintf(L"      先添加目录内文件/子目录，再添加目录本身。\n");
+    wprintf(L"      路径超过 260 字符时需加 \\?\\ 前缀（最多 32767 字符）。\n");
 }
 
 /**
@@ -1134,15 +1664,84 @@ static int ParseCommand(int argc, wchar_t* argv[])
     }
 
     if (_wcsicmp(argv[1], L"add") == 0) {
+        int i;
+        wchar_t** inputPaths = NULL;
+        int inputCount = 0;
+
         if (argc < 3) {
             WPRINTF_RED0(L"[错误] 缺少文件路径参数。\n");
-            wprintf(L"用法：%s add <文件路径>\n", argv[0]);
+            wprintf(L"用法：%s add <文件路径> [文件路径 ...]\n", argv[0]);
+            wprintf(L"      %s add @<列表文件>\n", argv[0]);
             return -1;
         }
-        if (AddToDeleteList(argv[2]) != ERROR_SUCCESS) {
-            return -1;
+
+        /* 检查是否为文件导入模式（@ 前缀且为唯一路径参数） */
+        if (argv[2][0] == L'@' && argc == 3) {
+            LONG result = ReadPathsFromFile(argv[2] + 1, &inputPaths, &inputCount);
+            if (result != ERROR_SUCCESS) {
+                WPRINTF_RED(L"[错误] 无法读取文件列表：%s\n", argv[2] + 1);
+                return -1;
+            }
+            if (inputCount == 0) {
+                wprintf(L"[信息] 文件列表为空。\n");
+                free(inputPaths);
+                return 0;
+            }
+        } else {
+            /* 多路径参数模式：argv[2] 到 argv[argc-1] */
+            int total = argc - 2;
+            inputPaths = (wchar_t**)malloc(total * sizeof(wchar_t*));
+            if (inputPaths == NULL) {
+                WPRINTF_RED0(L"[错误] 内存不足。\n");
+                return -1;
+            }
+            for (i = 0; i < total; i++) {
+                inputPaths[i] = _wcsdup(argv[2 + i]);
+                if (inputPaths[i] == NULL) {
+                    int j;
+                    for (j = 0; j < i; j++) free(inputPaths[j]);
+                    free(inputPaths);
+                    WPRINTF_RED0(L"[错误] 内存不足。\n");
+                    return -1;
+                }
+                inputCount++;
+            }
         }
-        return 0;
+
+        /* 展开非空目录（命令行模式，不提示确认） */
+        {
+            wchar_t** expandedPaths = NULL;
+            int expandedCount = 0;
+            int success;
+            LONG result;
+
+            result = ExpandDirectoryPaths((const wchar_t* const*)inputPaths,
+                                           inputCount, &expandedPaths,
+                                           &expandedCount, FALSE);
+
+            /* 释放输入路径 */
+            for (i = 0; i < inputCount; i++) free(inputPaths[i]);
+            free(inputPaths);
+
+            if (result != ERROR_SUCCESS) {
+                WPRINTF_RED0(L"[错误] 展开目录失败。\n");
+                return -1;
+            }
+
+            if (expandedCount == 0) {
+                wprintf(L"[信息] 没有有效的路径需要添加。\n");
+                free(expandedPaths);
+                return 0;
+            }
+
+            success = AddMultipleToDeleteList(
+                (const wchar_t* const*)expandedPaths, expandedCount);
+
+            for (i = 0; i < expandedCount; i++) free(expandedPaths[i]);
+            free(expandedPaths);
+
+            return (success == expandedCount) ? 0 : -1;
+        }
     }
 
     if (_wcsicmp(argv[1], L"skip") == 0) {
@@ -1282,6 +1881,19 @@ static BOOL RunAsAdmin(int argc, wchar_t* argv[])
     return TRUE;
 }
 
+/**
+ * 暂停并清屏
+ * 等待用户按回车键后清空控制台，保持界面整洁
+ */
+static void PauseAndClear(void)
+{
+    wint_t ch;
+    wprintf(L"\n按回车键继续...");
+    /* 读取并丢弃所有字符直到换行符或 EOF */
+    while ((ch = fgetwc(stdin)) != L'\n' && ch != WEOF) { }
+    system("cls");
+}
+
 /* ============================================================
  * 程序入口
  * ============================================================ */
@@ -1358,15 +1970,19 @@ int wmain(int argc, wchar_t* argv[])
         switch (choice) {
         case 1:
             HandleView();
+            PauseAndClear();
             break;
         case 2:
             HandleAdd();
+            PauseAndClear();
             break;
         case 3:
             HandleRemove(MODE_SKIP);
+            PauseAndClear();
             break;
         case 4:
             HandleRemove(MODE_ERASE);
+            PauseAndClear();
             break;
         case 5:
             wprintf(L"\n再见！\n");
