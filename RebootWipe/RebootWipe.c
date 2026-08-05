@@ -28,6 +28,9 @@
 #define REG_KEY_PATH       L"SYSTEM\\CurrentControlSet\\Control\\Session Manager"
 #define REG_VALUE_NAME     L"PendingFileRenameOperations"
 
+/* WOW64 重定向标志：确保 32 位进程在 64 位系统上访问真实的 64 位注册表视图 */
+#define REG_WOW64_FLAG     KEY_WOW64_64KEY
+
 /* 路径长度限制 */
 #define MAX_PATH_LEN       260
 
@@ -66,14 +69,16 @@ typedef struct {
  * ============================================================ */
 
 /**
- * 打开注册表键
+ * 打开注册表键（兼容 WOW64 重定向，确保访问 64 位注册表视图）
  * @param access 访问权限（KEY_READ / KEY_WRITE）
  * @param hKey   输出参数，返回注册表句柄
  * @return 成功返回 ERROR_SUCCESS
  */
 static LONG RW_OpenRegKey(REGSAM access, HKEY* hKey)
 {
-    return RegOpenKeyExW(HKEY_LOCAL_MACHINE, REG_KEY_PATH, 0, access, hKey);
+    /* 合并 WOW64 标志，避免 32 位进程在 64 位系统上被重定向到 Wow6432Node */
+    return RegOpenKeyExW(HKEY_LOCAL_MACHINE, REG_KEY_PATH, 0,
+                         access | REG_WOW64_FLAG, hKey);
 }
 
 /**
