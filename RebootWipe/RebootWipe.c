@@ -19,6 +19,7 @@
 #include <wchar.h>
 #include <io.h>
 #include <fcntl.h>
+#include <shellapi.h>
 
 /* ============================================================
  * 常量定义
@@ -412,13 +413,42 @@ static LONG ParseMultiSzData(const BYTE* data, DWORD size,
         op->sourcePath[srcLen] = L'\0';
 
         /* 检查是否为跳过项（以 ?? 开头） */
-        if (srcLen >= SKIP_PREFIX_LEN && 
+        if (srcLen >= SKIP_PREFIX_LEN &&
             op->sourcePath[0] == L'?' && op->sourcePath[1] == L'?') {
-            /* 移除 ?? 前缀 */
-            wcsncpy_s(op->sourcePath, MAX_PATH_LEN, 
-                      op->sourcePath + SKIP_PREFIX_LEN, srcLen - SKIP_PREFIX_LEN);
-            op->sourcePath[srcLen - SKIP_PREFIX_LEN] = L'\0';
+            /* 移除用户注入的 ?? 前缀 */
+            size_t newLen = srcLen - SKIP_PREFIX_LEN;
+            wcsncpy_s(op->sourcePath, MAX_PATH_LEN,
+                      op->sourcePath + SKIP_PREFIX_LEN, newLen);
+            op->sourcePath[newLen] = L'\0';
             op->type = OP_SKIPPED;
+            srcLen = newLen;
+        }
+
+        /* 检查是否有 Windows 10/11 的 *N 会话标记前缀 */
+        if (srcLen >= 2 && op->sourcePath[0] == L'*') {
+            size_t skipLen = 1;  /* 跳过 '*' */
+            while (skipLen < srcLen &&
+                   op->sourcePath[skipLen] >= L'0' &&
+                   op->sourcePath[skipLen] <= L'9') {
+                skipLen++;
+            }
+            if (skipLen < srcLen) {
+                size_t newLen = srcLen - skipLen;
+                wcsncpy_s(op->sourcePath, MAX_PATH_LEN,
+                          op->sourcePath + skipLen, newLen);
+                op->sourcePath[newLen] = L'\0';
+                srcLen = newLen;
+            }
+        }
+
+        /* 检查是否有 Windows API 的 \??\ 前缀 */
+        if (srcLen >= 4 && op->sourcePath[0] == L'\\' &&
+            op->sourcePath[1] == L'?' && op->sourcePath[2] == L'?' &&
+            op->sourcePath[3] == L'\\') {
+            size_t newPathLen = srcLen - 4;
+            wcsncpy_s(op->sourcePath, MAX_PATH_LEN,
+                      op->sourcePath + 4, newPathLen);
+            op->sourcePath[newPathLen] = L'\0';
         }
 
         ptr = srcEnd + 1;
@@ -481,6 +511,11 @@ static LONG InjectSkipPrefix(BYTE** buffer, DWORD* size, int index)
     ptr = (const wchar_t*)oldBuffer;
     end = (const wchar_t*)(oldBuffer + oldSize);
 
+    /* 跳过开头的空字符串（Windows API格式） */
+    while (ptr < end && *ptr == L'\0') {
+        ptr++;
+    }
+
     while (ptr < end && currentIdx < index) {
         /* 跳过源路径 */
         while (ptr < end && *ptr != L'\0') ptr++;
@@ -495,6 +530,16 @@ static LONG InjectSkipPrefix(BYTE** buffer, DWORD* size, int index)
         }
 
         currentIdx++;
+
+        /* 跳过条目终止符 */
+        if (ptr < end && *ptr == L'\0') {
+            ptr++;
+        }
+
+        /* 跳过可能的空字符串分隔符 */
+        while (ptr < end && *ptr == L'\0' && ptr + 1 < end && *(ptr + 1) != L'\0') {
+            ptr++;
+        }
     }
 
     if (currentIdx != index || ptr >= end) {
@@ -558,10 +603,16 @@ static LONG EraseEntry(BYTE** buffer, DWORD* size, int index)
     int currentIdx = 0;
     size_t offset;
     size_t bytesToRemove;
+    BOOL isLastEntry;
 
     /* 找到目标条目位置 */
     ptr = (const wchar_t*)oldBuffer;
     end = (const wchar_t*)(oldBuffer + oldSize);
+
+    /* 跳过开头的空字符串（Windows API格式） */
+    while (ptr < end && *ptr == L'\0') {
+        ptr++;
+    }
 
     while (ptr < end && currentIdx < index) {
         /* 跳过源路径 */
@@ -577,6 +628,11 @@ static LONG EraseEntry(BYTE** buffer, DWORD* size, int index)
         }
 
         currentIdx++;
+
+        /* 跳过条目终止符 */
+        if (ptr < end && *ptr == L'\0') {
+            ptr++;
+        }
     }
 
     if (currentIdx != index || ptr >= end) {
@@ -586,24 +642,50 @@ static LONG EraseEntry(BYTE** buffer, DWORD* size, int index)
     entryStart = ptr;
     offset = (size_t)((const BYTE*)entryStart - oldBuffer);
 
-    /* 计算条目结束位置 */
+    /* 计算条目结束位置（源路径 + 可选目标路径 + 终止符） */
     ptr = entryStart;
 
     /* 跳过源路径 */
     while (ptr < end && *ptr != L'\0') ptr++;
     if (ptr >= end) return ERROR_INVALID_PARAMETER;
-    ptr++;
+    ptr++;  /* 源路径后的 \0 */
 
-    /* 跳过目标路径 */
+    /* 跳过目标路径（如果有） */
     if (ptr < end && *ptr != L'\0') {
         while (ptr < end && *ptr != L'\0') ptr++;
         if (ptr >= end) return ERROR_INVALID_PARAMETER;
-        ptr++;
+        ptr++;  /* 目标路径后的 \0 */
     }
 
-    /* 检查是否需要包含额外的终止符 */
-    if (ptr < end && *ptr == L'\0') {
-        ptr++;  /* 包含终止符 */
+    /* 判断是否为最后一个条目（后面只有终止符或没有数据） */
+    isLastEntry = TRUE;
+    {
+        const wchar_t* checkPtr = ptr;
+        /* 跳过终止符检查是否有更多数据 */
+        if (checkPtr < end && *checkPtr == L'\0') {
+            checkPtr++;
+        }
+        /* 跳过可能的空字符串分隔符 */
+        while (checkPtr < end && *checkPtr == L'\0' && 
+               checkPtr + 1 < end && *(checkPtr + 1) != L'\0') {
+            checkPtr++;
+        }
+        /* 如果后面还有非空字符串，说明不是最后一个条目 */
+        if (checkPtr < end && *checkPtr != L'\0') {
+            isLastEntry = FALSE;
+        }
+    }
+
+    /* 如果不是最后一个条目，条目结束位置包含终止符 */
+    /* 如果是最后一个条目，条目结束位置不包含终止符（保留 \0\0 作为REG_MULTI_SZ结尾） */
+    if (!isLastEntry) {
+        /* 包含条目终止符 */
+        if (ptr < end && *ptr == L'\0') {
+            ptr++;
+        }
+    } else {
+        /* 最后一个条目，删除后保留 \0 终止符 */
+        /* 不包含条目终止符，让删除后的数据自然结尾 */
     }
 
     entryEnd = ptr;
@@ -612,16 +694,12 @@ static LONG EraseEntry(BYTE** buffer, DWORD* size, int index)
     /* 计算新大小 */
     newSize = oldSize - (DWORD)bytesToRemove;
 
-    /* 边界处理 */
+    /* 如果删除后数据无效，调整为最小的 REG_MULTI_SZ 格式（\0\0） */
     if (newSize < 2 * sizeof(wchar_t)) {
-        /* 数据太小，删除整个注册表值 */
-        LONG result = WriteRegistryData(NULL, 0);
-        if (result == ERROR_SUCCESS) {
-            free(oldBuffer);
-            *buffer = NULL;
-            *size = 0;
+        if (newSize == 0) {
+            /* 完全删除，返回空数据并添加 \0\0 */
+            newSize = 2 * sizeof(wchar_t);
         }
-        return result;
     }
 
     /* 分配新缓冲区 */
@@ -629,12 +707,44 @@ static LONG EraseEntry(BYTE** buffer, DWORD* size, int index)
     if (newBuffer == NULL) {
         return ERROR_OUTOFMEMORY;
     }
+    memset(newBuffer, 0, newSize);
 
     /* 复制前半部分 */
     memcpy(newBuffer, oldBuffer, offset);
 
-    /* 使用 memmove 复制后半部分（严禁使用 memcpy） */
-    memmove(newBuffer + offset, (const BYTE*)entryEnd, oldSize - (DWORD)offset - (DWORD)bytesToRemove);
+    /* 复制后半部分（条目之后的数据） */
+    {
+        size_t copySize = oldSize - (DWORD)offset - (DWORD)bytesToRemove;
+        if (copySize > 0 && entryEnd < end) {
+            memmove(newBuffer + offset, (const BYTE*)entryEnd, copySize);
+        }
+    }
+
+    /* 确保新数据以 \0\0 结尾 */
+    {
+        wchar_t* endPtr = (wchar_t*)(newBuffer + newSize - 2 * sizeof(wchar_t));
+        if (endPtr[0] != L'\0' || endPtr[1] != L'\0') {
+            /* 如果没有正确的终止符，添加它 */
+            /* 找到字符串实际结尾 */
+            wchar_t* lastStr = (wchar_t*)newBuffer;
+            wchar_t* scanPtr = (wchar_t*)newBuffer;
+            wchar_t* bufferEnd = (wchar_t*)(newBuffer + newSize);
+            
+            /* 找到最后一个字符串的结束位置 */
+            while (scanPtr < bufferEnd) {
+                while (scanPtr < bufferEnd && *scanPtr != L'\0') scanPtr++;
+                if (scanPtr >= bufferEnd) break;
+                lastStr = scanPtr;  /* 记录字符串结束位置 */
+                scanPtr++;
+            }
+            
+            /* 在最后一个字符串后添加终止符 */
+            if (lastStr >= (wchar_t*)newBuffer && 
+                lastStr + 2 <= (wchar_t*)(newBuffer + newSize)) {
+                lastStr[1] = L'\0';
+            }
+        }
+    }
 
     /* 写入注册表 */
     LONG result = WriteRegistryData(newBuffer, newSize);
@@ -850,10 +960,14 @@ static LONG RemoveOperation(int index, RemoveMode mode)
 
     /* 检查是否为跳过项 */
     if (ops[targetIdx].type == OP_SKIPPED) {
-        free(data);
-        free(ops);
-        wprintf(L"[警告] 第 %d 项已是跳过状态。\n", index);
-        return ERROR_SUCCESS;
+        if (mode == MODE_SKIP) {
+            /* 跳过模式：已经是跳过状态，直接返回 */
+            free(data);
+            free(ops);
+            wprintf(L"[警告] 第 %d 项已是跳过状态。\n", index);
+            return ERROR_SUCCESS;
+        }
+        /* 抹除模式：继续执行删除操作 */
     }
 
     /* 抹除模式：先备份 */
@@ -1073,12 +1187,108 @@ static int ParseCommand(int argc, wchar_t* argv[])
 }
 
 /* ============================================================
+ * 自动提权功能
+ * ============================================================ */
+
+/**
+ * 检查当前进程是否以管理员身份运行
+ * @return TRUE 如果是管理员，FALSE 否则
+ */
+static BOOL IsAdministrator(void)
+{
+    BOOL isAdmin = FALSE;
+    SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
+    PSID adminGroup = NULL;
+    HANDLE tokenHandle = NULL;
+    BOOL checkResult;
+
+    /* 创建管理员组 SID */
+    if (!AllocateAndInitializeSid(&ntAuthority, 2,
+        SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
+        0, 0, 0, 0, 0, 0, &adminGroup)) {
+        return FALSE;
+    }
+
+    /* 打开当前进程的访问令牌 */
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tokenHandle)) {
+        FreeSid(adminGroup);
+        return FALSE;
+    }
+
+    /* 检查令牌是否包含管理员组 */
+    checkResult = CheckTokenMembership(NULL, adminGroup, &isAdmin);
+
+    CloseHandle(tokenHandle);
+    FreeSid(adminGroup);
+
+    return isAdmin && checkResult;
+}
+
+/**
+ * 以管理员身份重新启动程序
+ * @param argc 参数数量
+ * @param argv 参数数组
+ * @return 如果成功启动提权进程则返回 TRUE，FALSE 否则
+ */
+static BOOL RunAsAdmin(int argc, wchar_t* argv[])
+{
+    wchar_t exePath[MAX_PATH];
+    wchar_t params[32768] = L"";
+    SHELLEXECUTEINFOW sei;
+    int i;
+    DWORD result;
+
+    /* 获取当前可执行文件路径 */
+    if (GetModuleFileNameW(NULL, exePath, MAX_PATH) == 0) {
+        return FALSE;
+    }
+
+    /* 构建命令行参数 */
+    for (i = 1; i < argc; i++) {
+        /* 如果参数包含空格，用引号包裹 */
+        if (wcschr(argv[i], L' ') != NULL) {
+            wcscat_s(params, 32768, L"\"");
+            wcscat_s(params, 32768, argv[i]);
+            wcscat_s(params, 32768, L"\"");
+        } else {
+            wcscat_s(params, 32768, argv[i]);
+        }
+        if (i < argc - 1) {
+            wcscat_s(params, 32768, L" ");
+        }
+    }
+
+    /* 初始化 SHELLEXECUTEINFOW 结构 */
+    memset(&sei, 0, sizeof(sei));
+    sei.cbSize = sizeof(sei);
+    sei.lpVerb = L"runas";
+    sei.lpFile = exePath;
+    sei.lpParameters = params;
+    sei.nShow = SW_SHOWNORMAL;
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+
+    /* 执行提权启动 */
+    result = ShellExecuteExW(&sei);
+
+    if (!result) {
+        return FALSE;
+    }
+
+    /* 释放进程句柄 */
+    if (sei.hProcess) {
+        CloseHandle(sei.hProcess);
+    }
+
+    return TRUE;
+}
+
+/* ============================================================
  * 程序入口
  * ============================================================ */
 
 int wmain(int argc, wchar_t* argv[])
 {
-    wchar_t input[16];
+    wchar_t input[64];
     int choice;
     int result = 0;
 
@@ -1090,6 +1300,18 @@ int wmain(int argc, wchar_t* argv[])
     /* 保存原始控制台颜色，用于错误输出后恢复 */
     SaveConsoleColor();
 
+    /* 自动提权：如果不是管理员，请求 UAC 提升 */
+    if (!IsAdministrator()) {
+        wprintf(L"[信息] 正在请求管理员权限...\n");
+        if (RunAsAdmin(argc, argv)) {
+            /* 提权成功，退出当前进程 */
+            return 0;
+        } else {
+            WPRINTF_RED0(L"[错误] 无法获取管理员权限，程序将继续运行但部分功能可能受限。\n");
+            wprintf(L"       建议：右键点击程序，选择「以管理员身份运行」。\n\n");
+        }
+    }
+
     /* 命令行模式 */
     if (argc > 1) {
         result = ParseCommand(argc, argv);
@@ -1098,8 +1320,37 @@ int wmain(int argc, wchar_t* argv[])
     while (1) {
         ShowMenu();
 
-        if (fgetws(input, 16, stdin) == NULL) {
+        if (fgetws(input, sizeof(input) / sizeof(input[0]), stdin) == NULL) {
             break;
+        }
+
+        /* 清除输入缓冲区中剩余的字符（处理超长输入） */
+        {
+            wint_t ch;
+            size_t len = wcslen(input);
+            /* 如果输入不以换行符结尾，说明缓冲区还有剩余数据 */
+            if (len > 0 && input[len - 1] != L'\n') {
+                /* 读取并丢弃剩余字符，直到换行符或EOF */
+                while ((ch = fgetwc(stdin)) != L'\n' && ch != WEOF) {
+                    /* 清空缓冲区 */
+                }
+                /* 清空 input 并设置错误提示 */
+                input[0] = L'\0';
+            }
+        }
+
+        /* 移除尾部换行符 */
+        {
+            size_t len = wcslen(input);
+            while (len > 0 && (input[len - 1] == L'\n' || input[len - 1] == L'\r')) {
+                input[--len] = L'\0';
+            }
+        }
+
+        /* 检查是否为空输入 */
+        if (input[0] == L'\0') {
+            wprintf(L"[错误] 输入过长，请重新选择 1-5。\n");
+            continue;
         }
 
         choice = _wtoi(input);
@@ -1121,9 +1372,7 @@ int wmain(int argc, wchar_t* argv[])
             wprintf(L"\n再见！\n");
             return 0;
         default:
-            if (input[0] != L'\n' && input[0] != L'\0') {
-                wprintf(L"\n[错误] 无效选择，请输入 1-5。\n");
-            }
+            wprintf(L"\n[错误] 无效选择，请输入 1-5。\n");
             break;
         }
     }
