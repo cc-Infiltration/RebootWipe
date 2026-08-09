@@ -152,6 +152,13 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="RebootWipe.c" />
+    <ClCompile Include="core.c" />
+    <ClCompile Include="gui.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="RebootWipe.h" />
+    <ClInclude Include="core.h" />
+    <ClInclude Include="gui.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
