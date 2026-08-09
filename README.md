@@ -71,18 +71,6 @@ RebootWipe.exe
   请选择操作 (1-5):
 ```
 
-**命令行模式**
-
-```bash
-RebootWipe.exe help                 # 显示帮助
-RebootWipe.exe read                 # 查看待处理列表
-RebootWipe.exe add C:\temp\file.txt  # 添加单个文件
-RebootWipe.exe add C:\a.txt;C:\b.txt;D:\dir  # 批量添加
-RebootWipe.exe add @list.txt        # 从文件批量导入
-RebootWipe.exe skip 3               # 跳过第 3 项操作
-RebootWipe.exe erase 5              # 抹除第 5 项操作
-```
-
 ---
 
 ## 🏗️ 架构
