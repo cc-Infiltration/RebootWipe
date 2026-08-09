@@ -29,6 +29,72 @@ void ResetConsoleColor(void);
     ResetConsoleColor(); \
 } while(0)
 
+#define WPRINTF_GREEN(fmt, ...) do { \
+    SetConsoleColor(CONSOLE_GREEN); \
+    wprintf(fmt, __VA_ARGS__); \
+    ResetConsoleColor(); \
+} while(0)
+
+#define WPRINTF_GREEN0(fmt) do { \
+    SetConsoleColor(CONSOLE_GREEN); \
+    wprintf(fmt); \
+    ResetConsoleColor(); \
+} while(0)
+
+#define WPRINTF_YELLOW(fmt, ...) do { \
+    SetConsoleColor(CONSOLE_YELLOW); \
+    wprintf(fmt, __VA_ARGS__); \
+    ResetConsoleColor(); \
+} while(0)
+
+#define WPRINTF_YELLOW0(fmt) do { \
+    SetConsoleColor(CONSOLE_YELLOW); \
+    wprintf(fmt); \
+    ResetConsoleColor(); \
+} while(0)
+
+#define WPRINTF_CYAN(fmt, ...) do { \
+    SetConsoleColor(CONSOLE_CYAN); \
+    wprintf(fmt, __VA_ARGS__); \
+    ResetConsoleColor(); \
+} while(0)
+
+#define WPRINTF_CYAN0(fmt) do { \
+    SetConsoleColor(CONSOLE_CYAN); \
+    wprintf(fmt); \
+    ResetConsoleColor(); \
+} while(0)
+
+#define WPRINTF_WHITE(fmt, ...) do { \
+    SetConsoleColor(CONSOLE_WHITE); \
+    wprintf(fmt, __VA_ARGS__); \
+    ResetConsoleColor(); \
+} while(0)
+
+#define WPRINTF_WHITE0(fmt) do { \
+    SetConsoleColor(CONSOLE_WHITE); \
+    wprintf(fmt); \
+    ResetConsoleColor(); \
+} while(0)
+
+#define WPRINTF_GRAY(fmt, ...) do { \
+    SetConsoleColor(CONSOLE_GRAY); \
+    wprintf(fmt, __VA_ARGS__); \
+    ResetConsoleColor(); \
+} while(0)
+
+#define WPRINTF_GRAY0(fmt) do { \
+    SetConsoleColor(CONSOLE_GRAY); \
+    wprintf(fmt); \
+    ResetConsoleColor(); \
+} while(0)
+
+#define WPRINTF_COLOR(color, fmt, ...) do { \
+    SetConsoleColor(color); \
+    wprintf(fmt, __VA_ARGS__); \
+    ResetConsoleColor(); \
+} while(0)
+
 /* ============================================================
  * 注册表 I/O
  * ============================================================ */

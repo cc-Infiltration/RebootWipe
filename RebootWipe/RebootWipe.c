@@ -90,7 +90,8 @@ int wmain(int argc, wchar_t* argv[])
 
         /* 检查是否为空输入 */
         if (input[0] == L'\0') {
-            wprintf(L"[错误] 输入过长，请重新选择 1-5。\n");
+            wprintf(L"\n[错误] 输入过长，请重新选择 1-5。\n");
+            PauseAndClear();
             continue;
         }
 
@@ -118,6 +119,7 @@ int wmain(int argc, wchar_t* argv[])
             return 0;
         default:
             wprintf(L"\n[错误] 无效选择，请输入 1-5。\n");
+            PauseAndClear();
             break;
         }
     }

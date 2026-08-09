@@ -710,21 +710,41 @@ int AddMultipleToDeleteList(const wchar_t* const* paths, int count)
 
     if (paths == NULL || count <= 0) return 0;
 
-    wprintf(L"\n--- 批量添加重启删除任务（共 %d 项）---\n\n", count);
+    wprintf(L"\n  ╔══════════════════════════════════════════════════════════════╗\n");
+    SetConsoleColor(CONSOLE_CYAN);
+    wprintf(L"  ║  批量添加重启删除任务（共 %d 项）                          ║\n", count);
+    ResetConsoleColor();
+    wprintf(L"  ╚══════════════════════════════════════════════════════════════╝\n\n");
 
     for (i = 0; i < count; i++) {
-        wprintf(L"[%d/%d] ", i + 1, count);
+        wprintf(L"  [%d/%d] ", i + 1, count);
         if (AddToDeleteList(paths[i]) == ERROR_SUCCESS) {
+            SetConsoleColor(CONSOLE_GREEN);
+            wprintf(L"[OK] ");
+            ResetConsoleColor();
+            wprintf(L"%s\n", paths[i]);
             success++;
         } else {
+            SetConsoleColor(CONSOLE_RED);
+            wprintf(L"[失败] ");
+            ResetConsoleColor();
+            wprintf(L"%s\n", paths[i]);
             failure++;
         }
     }
 
-    wprintf(L"\n");
-    wprintf(L"================================================================\n");
-    wprintf(L"  批量添加完成：成功 %d 项，失败 %d 项\n", success, failure);
-    wprintf(L"================================================================\n");
+    wprintf(L"\n  ──────────────────────────────────────────────────────────\n");
+    wprintf(L"  合计：");
+    SetConsoleColor(CONSOLE_GREEN);
+    wprintf(L"成功 %d", success);
+    ResetConsoleColor();
+    if (failure > 0) {
+        wprintf(L"  ");
+        SetConsoleColor(CONSOLE_RED);
+        wprintf(L"失败 %d", failure);
+        ResetConsoleColor();
+    }
+    wprintf(L"\n\n");
 
     return success;
 }
