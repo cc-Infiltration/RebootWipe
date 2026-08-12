@@ -18,6 +18,7 @@
  * 工具函数
  * ============================================================ */
 
+// 截断过长路径，保留末尾 "..." 标记
 static void TruncatePath(const wchar_t* src, wchar_t* dst, int maxLen)
 {
     int len = (int)wcslen(src);
@@ -33,6 +34,7 @@ static void TruncatePath(const wchar_t* src, wchar_t* dst, int maxLen)
  * 暂停并清屏
  * ============================================================ */
 
+// 暂停等待用户按回车，然后安全清屏（Win32 API 实现）
 void PauseAndClear(void)
 {
     SetConsoleColor(CONSOLE_CYAN);
@@ -46,6 +48,7 @@ void PauseAndClear(void)
  * UAC 自动提权
  * ============================================================ */
 
+// 检测当前进程是否以管理员权限运行
 BOOL IsAdministrator(void)
 {
     BOOL isAdmin = FALSE;
@@ -73,6 +76,7 @@ BOOL IsAdministrator(void)
     return isAdmin && checkResult;
 }
 
+// 通过 ShellExecuteEx + runas 触发 UAC 提升，以管理员身份重启自身
 BOOL RunAsAdmin(int argc, wchar_t* argv[])
 {
     wchar_t exePath[MAX_PATH];
@@ -143,6 +147,7 @@ BOOL RunAsAdmin(int argc, wchar_t* argv[])
  * 功能函数
  * ============================================================ */
 
+// 读取并格式化打印 PendingFileRenameOperations 列表，返回操作条目数
 int ShowPendingList(void)
 {
     BYTE* data = NULL;
@@ -241,6 +246,7 @@ int ShowPendingList(void)
     return count;
 }
 
+// 根据模式取消指定索引的注册表操作：MODE_SKIP 注入 ?? 前缀，MODE_ERASE 物理删除并自动备份
 LONG RemoveOperation(int index, RemoveMode mode)
 {
     BYTE* data = NULL;
@@ -373,6 +379,7 @@ LONG RemoveOperation(int index, RemoveMode mode)
  * CLI 界面
  * ============================================================ */
 
+// 显示主菜单，含实时待处理操作数量提示
 void ShowMenu(void)
 {
     int pendingCount = 0;
@@ -448,11 +455,13 @@ void ShowMenu(void)
     ResetConsoleColor();
 }
 
+// 菜单 [1] 处理函数：查看待处理操作列表
 void HandleView(void)
 {
     ShowPendingList();
 }
 
+// 菜单 [2] 处理函数：交互式输入路径并添加到重启删除列表（支持分号分隔、@文件导入、目录递归展开）
 void HandleAdd(void)
 {
     wchar_t input[MAX_INPUT_LEN];
@@ -597,6 +606,7 @@ void HandleAdd(void)
     }
 }
 
+// 菜单 [3]/[4] 处理函数：选择取消模式后输入序号执行取消操作
 void HandleRemove(RemoveMode mode)
 {
     wchar_t input[32];
@@ -654,6 +664,7 @@ void HandleRemove(RemoveMode mode)
     RemoveOperation(index, mode);
 }
 
+// 打印命令行帮助信息：用法、子命令列表、交互式 add 说明
 void ShowHelp(const wchar_t* progName)
 {
     SetConsoleColor(CONSOLE_WHITE);
@@ -727,6 +738,7 @@ void ShowHelp(const wchar_t* progName)
     wprintf(L"    · 路径超过 260 字符时需加 \\?\\ 前缀（最多 32767 字符）\n");
 }
 
+// 解析命令行参数并分发到对应处理函数（read/add/skip/erase/help），返回 0 成功 / -1 失败
 int ParseCommand(int argc, wchar_t* argv[])
 {
     if (argc < 2) {

@@ -18,12 +18,14 @@
 
 static WORD g_originalAttrs = 0;
 
+// 设置控制台输出文字颜色
 void SetConsoleColor(WORD attr)
 {
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
     SetConsoleTextAttribute(hOut, attr);
 }
 
+// 保存当前控制台颜色属性，供 ResetConsoleColor 恢复
 void SaveConsoleColor(void)
 {
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -32,11 +34,13 @@ void SaveConsoleColor(void)
     g_originalAttrs = info.wAttributes;
 }
 
+// 恢复控制台颜色为 SaveConsoleColor 保存的原始值
 void ResetConsoleColor(void)
 {
     SetConsoleColor(g_originalAttrs);
 }
 
+// 使用 Win32 API 安全清屏（FillConsoleOutputCharacter + SetConsoleCursorPosition）
 void ClearConsole(void)
 {
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -60,6 +64,7 @@ void ClearConsole(void)
  * 安全输入解析
  * ============================================================ */
 
+// 安全的宽字符串转整数：防溢出、拒绝非数字字符，成功返回 TRUE
 BOOL SafeParseInt(const wchar_t* str, int* value)
 {
     const wchar_t* p;
@@ -97,6 +102,7 @@ BOOL SafeParseInt(const wchar_t* str, int* value)
     return TRUE;
 }
 
+// 清空 stdin 缓冲区中所有残留字符（防止污染下一次输入）
 void FlushStdin(void)
 {
     wint_t ch;
@@ -107,6 +113,7 @@ void FlushStdin(void)
  * 注册表 I/O
  * ============================================================ */
 
+// 以指定权限打开注册表键，优先使用 WOW64 标志访问 64 位视图
 LONG RW_OpenRegKey(REGSAM access, HKEY* hKey)
 {
     LONG result;
@@ -122,6 +129,7 @@ LONG RW_OpenRegKey(REGSAM access, HKEY* hKey)
     return result;
 }
 
+// 以指定权限打开/创建注册表键，优先尝试 WOW64 标志
 LONG RW_CreateRegKey(REGSAM access, HKEY* hKey)
 {
     LONG result;
@@ -138,6 +146,7 @@ LONG RW_CreateRegKey(REGSAM access, HKEY* hKey)
     return result;
 }
 
+// 读取 PendingFileRenameOperations 注册表值，返回堆分配的原始数据
 LONG ReadRegistryData(BYTE** buffer, DWORD* size)
 {
     HKEY hKey = NULL;
@@ -182,6 +191,7 @@ LONG ReadRegistryData(BYTE** buffer, DWORD* size)
     return ERROR_SUCCESS;
 }
 
+// 写入数据到注册表，写入后立即读回验证；size=0 时删除该值
 LONG WriteRegistryData(const BYTE* buffer, DWORD size)
 {
     HKEY hKey = NULL;
@@ -241,6 +251,7 @@ LONG WriteRegistryData(const BYTE* buffer, DWORD size)
     return result;
 }
 
+// 将当前注册表数据备份到临时文件，抹除操作前自动调用
 LONG BackupData(const BYTE* data, DWORD size, wchar_t** path)
 {
     wchar_t tempDir[MAX_PATH];
@@ -280,6 +291,7 @@ LONG BackupData(const BYTE* data, DWORD size, wchar_t** path)
  * 核心算法
  * ============================================================ */
 
+// 解析 REG_MULTI_SZ 原始数据为 PendingOperation 数组，识别删除/移动/跳过类型
 LONG ParseMultiSzData(const BYTE* data, DWORD size,
                       PendingOperation** operations, int* count)
 {
@@ -412,6 +424,7 @@ LONG ParseMultiSzData(const BYTE* data, DWORD size,
     return ERROR_SUCCESS;
 }
 
+// 在指定索引的条目前插入 ?? 前缀实现"安全跳过"，已被跳过则无操作
 LONG InjectSkipPrefix(BYTE** buffer, DWORD* size, int index)
 {
     BYTE* oldBuffer = *buffer;
@@ -487,6 +500,7 @@ LONG InjectSkipPrefix(BYTE** buffer, DWORD* size, int index)
     return result;
 }
 
+// 物理删除指定索引的条目，使用 memmove 防止内存重叠，自动处理末尾双空终止
 LONG EraseEntry(BYTE** buffer, DWORD* size, int index)
 {
     BYTE* oldBuffer = *buffer;
@@ -630,6 +644,7 @@ LONG EraseEntry(BYTE** buffer, DWORD* size, int index)
  * 路径处理
  * ============================================================ */
 
+// 去除路径字符串首尾的空白和引号，原地修改
 wchar_t* TrimPath(wchar_t* str)
 {
     wchar_t* start;
@@ -659,6 +674,7 @@ wchar_t* TrimPath(wchar_t* str)
  * 文件添加
  * ============================================================ */
 
+// 通过 MoveFileExW(MOVEFILE_DELAY_UNTIL_REBOOT) 将路径添加到重启删除列表，写入前先验证路径存在
 LONG AddToDeleteList(const wchar_t* filePath)
 {
     LONG result;
@@ -701,6 +717,7 @@ LONG AddToDeleteList(const wchar_t* filePath)
     return ERROR_SUCCESS;
 }
 
+// 从 UTF-8/UTF-16 文本文件逐行读取路径并 Trim，# 开头的行为注释跳过
 LONG ReadPathsFromFile(const wchar_t* filePath, wchar_t*** paths, int* count)
 {
     FILE* fp = NULL;
@@ -786,6 +803,7 @@ LONG ReadPathsFromFile(const wchar_t* filePath, wchar_t*** paths, int* count)
     return ERROR_SUCCESS;
 }
 
+// 批量调用 AddToDeleteList，带进度显示和成功/跳过/失败分类汇总
 int AddMultipleToDeleteList(const wchar_t* const* paths, int count)
 {
     int i;
@@ -842,6 +860,7 @@ int AddMultipleToDeleteList(const wchar_t* const* paths, int count)
  * 目录递归展开
  * ============================================================ */
 
+// 判断给定路径是否为目录（通过 GetFileAttributesW 属性判断）
 BOOL IsDirectoryPath(const wchar_t* path)
 {
     DWORD attrs = GetFileAttributesW(path);
@@ -849,6 +868,7 @@ BOOL IsDirectoryPath(const wchar_t* path)
     return (attrs & FILE_ATTRIBUTE_DIRECTORY) ? TRUE : FALSE;
 }
 
+// 判断目录是否含有任何内容（绕过 . 和 ..），空目录返回 FALSE
 BOOL IsDirectoryNonEmpty(const wchar_t* dirPath)
 {
     WIN32_FIND_DATAW findData;
@@ -877,6 +897,7 @@ BOOL IsDirectoryNonEmpty(const wchar_t* dirPath)
     return nonEmpty;
 }
 
+// 验证给定路径是否真实存在（文件或目录），作为写入注册表前的安全守卫
 BOOL IsPathValid(const wchar_t* path)
 {
     DWORD attrs;
@@ -888,6 +909,7 @@ BOOL IsPathValid(const wchar_t* path)
     return (attrs != INVALID_FILE_ATTRIBUTES);
 }
 
+// 内部函数：将路径拷贝追加到动态数组，容量不足时自动扩容
 static LONG AddPathToArray(wchar_t*** paths, int* count, int* capacity,
                            const wchar_t* path)
 {
@@ -908,6 +930,7 @@ static LONG AddPathToArray(wchar_t*** paths, int* count, int* capacity,
     return ERROR_SUCCESS;
 }
 
+// 内部函数：后序遍历收集目录下所有文件/子目录路径，跳过重解析点防止无限循环
 static LONG CollectDirectoryPaths(const wchar_t* dirPath,
                                   wchar_t*** paths, int* count, int* capacity)
 {
@@ -971,6 +994,7 @@ static LONG CollectDirectoryPaths(const wchar_t* dirPath,
     return AddPathToArray(paths, count, capacity, dirPath);
 }
 
+// 展开输入路径列表：非空目录递归展开为文件/子目录列表，交互模式下逐个确认
 LONG ExpandDirectoryPaths(const wchar_t* const* inputPaths, int inputCount,
                           wchar_t*** outPaths, int* outCount,
                           BOOL interactive)
