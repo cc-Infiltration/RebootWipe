@@ -71,11 +71,9 @@ int wmain(int argc, wchar_t* argv[])
 
         /* 清除输入缓冲区中剩余的字符（处理超长输入） */
         {
-            wint_t ch;
             size_t len = wcslen(input);
             if (len > 0 && input[len - 1] != L'\n') {
-                while ((ch = fgetwc(stdin)) != L'\n' && ch != WEOF) {
-                }
+                FlushStdin();
                 input[0] = L'\0';
             }
         }
@@ -95,7 +93,16 @@ int wmain(int argc, wchar_t* argv[])
             continue;
         }
 
-        choice = _wtoi(input);
+        /* 验证输入是否为有效数字 */
+        {
+            int validChoice = 0;
+            if (!SafeParseInt(input, &validChoice) || validChoice < 1 || validChoice > 5) {
+                wprintf(L"\n[错误] 无效选择，请输入 1-5。\n");
+                PauseAndClear();
+                continue;
+            }
+            choice = validChoice;
+        }
 
         switch (choice) {
         case 1:

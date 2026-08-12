@@ -35,12 +35,11 @@ static void TruncatePath(const wchar_t* src, wchar_t* dst, int maxLen)
 
 void PauseAndClear(void)
 {
-    wint_t ch;
     SetConsoleColor(CONSOLE_CYAN);
     wprintf(L"\n  按回车键继续...");
     ResetConsoleColor();
-    while ((ch = fgetwc(stdin)) != L'\n' && ch != WEOF) { }
-    system("cls");
+    FlushStdin();
+    ClearConsole();
 }
 
 /* ============================================================
@@ -81,21 +80,41 @@ BOOL RunAsAdmin(int argc, wchar_t* argv[])
     SHELLEXECUTEINFOW sei;
     int i;
     DWORD result;
+    size_t totalLen = 0;
+    size_t maxLen = 32768;  /* _countof(params) */
 
     if (GetModuleFileNameW(NULL, exePath, MAX_PATH) == 0) {
         return FALSE;
     }
 
     for (i = 1; i < argc; i++) {
-        if (wcschr(argv[i], L' ') != NULL) {
-            wcscat_s(params, 32768, L"\"");
-            wcscat_s(params, 32768, argv[i]);
-            wcscat_s(params, 32768, L"\"");
-        } else {
-            wcscat_s(params, 32768, argv[i]);
+        BOOL hasSpace;
+        size_t argLen;
+        size_t needed;
+
+        argLen = wcslen(argv[i]);
+        hasSpace = (wcschr(argv[i], L' ') != NULL);
+
+        /* 所需字符数 = 已有长度 + 分隔空格 + 参数（可能加引号） */
+        needed = totalLen + (totalLen > 0 ? 1 : 0) + argLen + (hasSpace ? 2 : 0);
+        if (needed >= maxLen) {
+            /* 超出缓冲区，忽略剩余参数 */
+            break;
         }
-        if (i < argc - 1) {
-            wcscat_s(params, 32768, L" ");
+
+        if (totalLen > 0) {
+            params[totalLen++] = L' ';
+        }
+
+        if (hasSpace) {
+            params[totalLen++] = L'\"';
+        }
+
+        wcscpy_s(params + totalLen, maxLen - totalLen, argv[i]);
+        totalLen += argLen;
+
+        if (hasSpace) {
+            params[totalLen++] = L'\"';
         }
     }
 
@@ -292,6 +311,9 @@ LONG RemoveOperation(int index, RemoveMode mode)
 
         {
             size_t len = wcslen(input);
+            if (len > 0 && input[len - 1] != L'\n') {
+                FlushStdin();
+            }
             while (len > 0 && (input[len - 1] == L'\n' || input[len - 1] == L'\r')) {
                 input[--len] = L'\0';
             }
@@ -465,8 +487,7 @@ void HandleAdd(void)
 
     len = wcslen(input);
     if (len > 0 && input[len - 1] != L'\n') {
-        wint_t ch;
-        while ((ch = fgetwc(stdin)) != L'\n' && ch != WEOF) { }
+        FlushStdin();
         WPRINTF_YELLOW0(L"  [警告] 输入过长，已截断。\n");
     }
 
@@ -607,7 +628,18 @@ void HandleRemove(RemoveMode mode)
         return;
     }
 
-    index = _wtoi(input);
+    /* 如果输入被截断（没有换行符），清空剩余缓冲区 */
+    {
+        size_t ilen = wcslen(input);
+        if (ilen > 0 && input[ilen - 1] != L'\n') {
+            FlushStdin();
+        }
+    }
+
+    if (!SafeParseInt(input, &index)) {
+        WPRINTF_RED0(L"  [错误] 无效的序号。\n");
+        return;
+    }
     if (index == 0) {
         SetConsoleColor(CONSOLE_CYAN);
         wprintf(L"  [信息] 已返回主菜单。\n");
@@ -818,8 +850,7 @@ int ParseCommand(int argc, wchar_t* argv[])
             wprintf(L"%s skip <序号>\n", argv[0]);
             return -1;
         }
-        index = _wtoi(argv[2]);
-        if (index <= 0) {
+        if (!SafeParseInt(argv[2], &index) || index <= 0) {
             WPRINTF_RED0(L"  [错误] 序号必须为正整数。\n");
             return -1;
         }
@@ -840,8 +871,7 @@ int ParseCommand(int argc, wchar_t* argv[])
             wprintf(L"%s erase <序号>\n", argv[0]);
             return -1;
         }
-        index = _wtoi(argv[2]);
-        if (index <= 0) {
+        if (!SafeParseInt(argv[2], &index) || index <= 0) {
             WPRINTF_RED0(L"  [错误] 序号必须为正整数。\n");
             return -1;
         }

@@ -16,6 +16,13 @@
 void SaveConsoleColor(void);
 void SetConsoleColor(WORD attr);
 void ResetConsoleColor(void);
+void ClearConsole(void);
+
+/* 安全的宽字符串转整数（防溢出、防非法字符） */
+BOOL SafeParseInt(const wchar_t* str, int* value);
+
+/* 清空 stdin 缓冲区（防止残留污染下一次输入） */
+void FlushStdin(void);
 
 #define WPRINTF_RED(fmt, ...) do { \
     SetConsoleColor(CONSOLE_RED); \
@@ -124,6 +131,7 @@ LONG ReadPathsFromFile(const wchar_t* filePath, wchar_t*** paths, int* count);
 int AddMultipleToDeleteList(const wchar_t* const* paths, int count);
 BOOL IsDirectoryPath(const wchar_t* path);
 BOOL IsDirectoryNonEmpty(const wchar_t* dirPath);
+BOOL IsPathValid(const wchar_t* path);
 LONG ExpandDirectoryPaths(const wchar_t* const* inputPaths, int inputCount,
                           wchar_t*** outPaths, int* outCount,
                           BOOL interactive);

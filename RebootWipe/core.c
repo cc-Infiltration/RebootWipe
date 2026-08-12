@@ -37,6 +37,72 @@ void ResetConsoleColor(void)
     SetConsoleColor(g_originalAttrs);
 }
 
+void ClearConsole(void)
+{
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    CONSOLE_SCREEN_BUFFER_INFO info;
+    DWORD written;
+    COORD origin = { 0, 0 };
+
+    if (!GetConsoleScreenBufferInfo(hOut, &info)) {
+        /* Fallback: 如果无法获取信息则不做清屏 */
+        return;
+    }
+
+    FillConsoleOutputCharacterW(hOut, L' ', info.dwSize.X * info.dwSize.Y,
+                                origin, &written);
+    FillConsoleOutputAttribute(hOut, g_originalAttrs,
+                               info.dwSize.X * info.dwSize.Y, origin, &written);
+    SetConsoleCursorPosition(hOut, origin);
+}
+
+/* ============================================================
+ * 安全输入解析
+ * ============================================================ */
+
+BOOL SafeParseInt(const wchar_t* str, int* value)
+{
+    const wchar_t* p;
+    int sign = 1;
+    long long result = 0;
+
+    if (str == NULL || value == NULL) return FALSE;
+    if (*str == L'\0') return FALSE;
+
+    /* 跳过前导空白 */
+    p = str;
+    while (*p == L' ' || *p == L'\t') p++;
+    if (*p == L'\0') return FALSE;
+
+    /* 处理符号 */
+    if (*p == L'-') { sign = -1; p++; }
+    else if (*p == L'+') { p++; }
+
+    if (*p == L'\0') return FALSE;
+
+    /* 逐字符校验并累加 */
+    while (*p != L'\0') {
+        if (*p < L'0' || *p > L'9') {
+            /* 允许尾部空格/换行 */
+            if (*p == L' ' || *p == L'\t' || *p == L'\n' || *p == L'\r') break;
+            return FALSE;
+        }
+        result = result * 10 + (*p - L'0');
+        if (sign > 0 && result > INT_MAX) return FALSE;
+        if (sign < 0 && result > (long long)INT_MAX + 1) return FALSE;
+        p++;
+    }
+
+    *value = (int)(sign * result);
+    return TRUE;
+}
+
+void FlushStdin(void)
+{
+    wint_t ch;
+    while ((ch = fgetwc(stdin)) != L'\n' && ch != WEOF) { }
+}
+
 /* ============================================================
  * 注册表 I/O
  * ============================================================ */
@@ -610,6 +676,13 @@ LONG AddToDeleteList(const wchar_t* filePath)
     wcscpy_s(cleanPath, wcslen(filePath) + 1, filePath);
     TrimPath(cleanPath);
 
+    /* 路径有效性验证：只有真实存在的文件/目录才允许写入 */
+    if (!IsPathValid(cleanPath)) {
+        WPRINTF_RED(L"[跳过] 路径不存在，已跳过：%s\n", filePath);
+        free(cleanPath);
+        return ERROR_FILE_NOT_FOUND;
+    }
+
     result = MoveFileExW(cleanPath, NULL, MOVEFILE_DELAY_UNTIL_REBOOT);
     free(cleanPath);
 
@@ -632,7 +705,7 @@ LONG ReadPathsFromFile(const wchar_t* filePath, wchar_t*** paths, int* count)
 {
     FILE* fp = NULL;
     errno_t err;
-    wchar_t line[MAX_LONG_PATH_LEN];
+    wchar_t* line = NULL;
     wchar_t** arr = NULL;
     int arrCount = 0;
     int capacity = 16;
@@ -641,13 +714,21 @@ LONG ReadPathsFromFile(const wchar_t* filePath, wchar_t*** paths, int* count)
     *paths = NULL;
     *count = 0;
 
+    /* 堆分配防止栈溢出（MAX_LONG_PATH_LEN ≈ 64KB） */
+    line = (wchar_t*)malloc(MAX_LONG_PATH_LEN * sizeof(wchar_t));
+    if (line == NULL) {
+        return ERROR_OUTOFMEMORY;
+    }
+
     err = _wfopen_s(&fp, filePath, L"r, ccs=UTF-8");
     if (err != 0 || fp == NULL) {
+        free(line);
         return ERROR_FILE_NOT_FOUND;
     }
 
     arr = (wchar_t**)malloc(capacity * sizeof(wchar_t*));
     if (arr == NULL) {
+        free(line);
         fclose(fp);
         return ERROR_OUTOFMEMORY;
     }
@@ -668,6 +749,7 @@ LONG ReadPathsFromFile(const wchar_t* filePath, wchar_t*** paths, int* count)
         if (trimmed == NULL) {
             for (i = 0; i < (size_t)arrCount; i++) free(arr[i]);
             free(arr);
+            free(line);
             fclose(fp);
             return ERROR_OUTOFMEMORY;
         }
@@ -687,6 +769,7 @@ LONG ReadPathsFromFile(const wchar_t* filePath, wchar_t*** paths, int* count)
                 free(trimmed);
                 for (i = 0; i < (size_t)arrCount; i++) free(arr[i]);
                 free(arr);
+                free(line);
                 fclose(fp);
                 return ERROR_OUTOFMEMORY;
             }
@@ -697,6 +780,7 @@ LONG ReadPathsFromFile(const wchar_t* filePath, wchar_t*** paths, int* count)
     }
 
     fclose(fp);
+    free(line);
     *paths = arr;
     *count = arrCount;
     return ERROR_SUCCESS;
@@ -706,6 +790,7 @@ int AddMultipleToDeleteList(const wchar_t* const* paths, int count)
 {
     int i;
     int success = 0;
+    int skipped = 0;
     int failure = 0;
 
     if (paths == NULL || count <= 0) return 0;
@@ -717,18 +802,16 @@ int AddMultipleToDeleteList(const wchar_t* const* paths, int count)
     wprintf(L"  ╚══════════════════════════════════════════════════════════════╝\n\n");
 
     for (i = 0; i < count; i++) {
+        LONG result;
         wprintf(L"  [%d/%d] ", i + 1, count);
-        if (AddToDeleteList(paths[i]) == ERROR_SUCCESS) {
-            SetConsoleColor(CONSOLE_GREEN);
-            wprintf(L"[OK] ");
-            ResetConsoleColor();
-            wprintf(L"%s\n", paths[i]);
+        result = AddToDeleteList(paths[i]);
+        if (result == ERROR_SUCCESS) {
             success++;
+        } else if (result == ERROR_FILE_NOT_FOUND) {
+            /* 路径无效，已在 AddToDeleteList 中输出 "[跳过]" */
+            skipped++;
         } else {
-            SetConsoleColor(CONSOLE_RED);
-            wprintf(L"[失败] ");
-            ResetConsoleColor();
-            wprintf(L"%s\n", paths[i]);
+            /* 其他写入错误，已在 AddToDeleteList 中输出 "[错误]" */
             failure++;
         }
     }
@@ -738,6 +821,12 @@ int AddMultipleToDeleteList(const wchar_t* const* paths, int count)
     SetConsoleColor(CONSOLE_GREEN);
     wprintf(L"成功 %d", success);
     ResetConsoleColor();
+    if (skipped > 0) {
+        wprintf(L"  ");
+        SetConsoleColor(CONSOLE_YELLOW);
+        wprintf(L"跳过 %d", skipped);
+        ResetConsoleColor();
+    }
     if (failure > 0) {
         wprintf(L"  ");
         SetConsoleColor(CONSOLE_RED);
@@ -786,6 +875,17 @@ BOOL IsDirectoryNonEmpty(const wchar_t* dirPath)
 
     FindClose(hFind);
     return nonEmpty;
+}
+
+BOOL IsPathValid(const wchar_t* path)
+{
+    DWORD attrs;
+
+    if (path == NULL || *path == L'\0') return FALSE;
+
+    /* GetFileAttributesW 对文件和目录均有效，不存在返回 INVALID_FILE_ATTRIBUTES */
+    attrs = GetFileAttributesW(path);
+    return (attrs != INVALID_FILE_ATTRIBUTES);
 }
 
 static LONG AddPathToArray(wchar_t*** paths, int* count, int* capacity,
@@ -925,8 +1025,7 @@ LONG ExpandDirectoryPaths(const wchar_t* const* inputPaths, int inputCount,
 
                 alen = wcslen(answer);
                 if (alen > 0 && answer[alen - 1] != L'\n') {
-                    wint_t ch;
-                    while ((ch = fgetwc(stdin)) != L'\n' && ch != WEOF) { }
+                    FlushStdin();
                 }
                 while (alen > 0 && (answer[alen - 1] == L'\n' || answer[alen - 1] == L'\r')) {
                     answer[--alen] = L'\0';
