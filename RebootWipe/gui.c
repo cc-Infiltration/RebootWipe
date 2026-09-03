@@ -51,7 +51,7 @@ void PauseAndClear(void)
 // 检测当前进程是否以管理员权限运行
 BOOL IsAdministrator(void)
 {
-    BOOL isAdmin = FALSE;
+    BOOL isAdmin = FALSE; 
     SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
     PSID adminGroup = NULL;
     HANDLE tokenHandle = NULL;
@@ -408,13 +408,13 @@ void ShowMenu(void)
     if (pendingCount > 0) {
         wprintf(L"  ║  ");
         SetConsoleColor(CONSOLE_YELLOW);
-        wprintf(L"[警告] 有 %d 项待处理操作", pendingCount);
+        wprintf(L"[info] 有 %d 项待处理操作", pendingCount);
         ResetConsoleColor();
         wprintf(L"                              ║\n");
     } else {
         wprintf(L"  ║  ");
         SetConsoleColor(CONSOLE_GREEN);
-        wprintf(L"[成功] 无待处理操作");
+        wprintf(L"[info] 无待处理操作");
         ResetConsoleColor();
         wprintf(L"                                  ║\n");
     }
@@ -541,7 +541,7 @@ void HandleAdd(void)
 
         inputPaths = (wchar_t**)malloc(MAX_BATCH_PATHS * sizeof(wchar_t*));
         if (inputPaths == NULL) {
-            WPRINTF_RED0(L"  [错误] 内存不足。\n");
+            WPRINTF_RED0(L"  [错误] 内存不足\n");
             return;
         }
 
@@ -552,7 +552,7 @@ void HandleAdd(void)
                 if (inputPaths[inputCount] == NULL) {
                     for (i = 0; i < inputCount; i++) free(inputPaths[i]);
                     free(inputPaths);
-                    WPRINTF_RED0(L"  [错误] 内存不足。\n");
+                    WPRINTF_RED0(L"  [错误] 内存不足\n");
                     return;
                 }
                 inputCount++;
@@ -561,7 +561,7 @@ void HandleAdd(void)
         }
 
         if (inputCount == 0) {
-            WPRINTF_RED0(L"  [错误] 未解析到有效路径。\n");
+            WPRINTF_RED0(L"  [错误] 未解析到有效路径\n");
             free(inputPaths);
             return;
         }
@@ -583,13 +583,13 @@ void HandleAdd(void)
         free(inputPaths);
 
         if (result != ERROR_SUCCESS) {
-            WPRINTF_RED0(L"  [错误] 展开目录失败。\n");
+            WPRINTF_RED0(L"  [错误] 展开目录失败\n");
             return;
         }
 
         if (expandedCount == 0) {
             SetConsoleColor(CONSOLE_CYAN);
-            wprintf(L"  [信息] 没有有效的路径需要添加。\n");
+            wprintf(L"  [信息] 没有有效的路径需要添加\n");
             ResetConsoleColor();
             free(expandedPaths);
             return;

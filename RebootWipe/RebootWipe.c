@@ -45,7 +45,7 @@ int wmain(int argc, wchar_t* argv[])
 
     /* 自动提权：如果不是管理员，请求 UAC 提升 */
     if (!IsAdministrator()) {
-        wprintf(L"[信息] 正在请求管理员权限...\n");
+        wprintf(L"[info] 正在请求管理员权限...\n");
         if (RunAsAdmin(argc, argv)) {
             /* 提权成功，退出当前进程 */
             return 0;
@@ -88,7 +88,7 @@ int wmain(int argc, wchar_t* argv[])
 
         /* 检查是否为空输入 */
         if (input[0] == L'\0') {
-            wprintf(L"\n[错误] 输入过长，请重新选择 1-5。\n");
+            wprintf(L"\n[错误] 输入为空，请重新选择 1-5\n");
             PauseAndClear();
             continue;
         }
@@ -97,7 +97,7 @@ int wmain(int argc, wchar_t* argv[])
         {
             int validChoice = 0;
             if (!SafeParseInt(input, &validChoice) || validChoice < 1 || validChoice > 5) {
-                wprintf(L"\n[错误] 无效选择，请输入 1-5。\n");
+                wprintf(L"\n[错误] 无效的选择，请输入 1-5\n");
                 PauseAndClear();
                 continue;
             }

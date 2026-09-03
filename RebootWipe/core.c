@@ -155,28 +155,33 @@ LONG ReadRegistryData(BYTE** buffer, DWORD* size)
     DWORD dataSize = 0;
     BYTE* data = NULL;
 
+    // 以读取权限打开注册表键
     result = RW_OpenRegKey(KEY_READ, &hKey);
     if (result != ERROR_SUCCESS) {
         return result;
     }
 
+    // 查询数据大小（不读取数据本身）
     result = RegQueryValueExW(hKey, REG_VALUE_NAME, NULL, &type, NULL, &dataSize);
     if (result != ERROR_SUCCESS) {
         RegCloseKey(hKey);
         return result;
     }
 
+    // 值为空时直接返回
     if (dataSize == 0) {
         RegCloseKey(hKey);
         return ERROR_FILE_NOT_FOUND;
     }
 
+    // 根据实际大小分配堆缓冲区
     data = (BYTE*)malloc(dataSize);
     if (data == NULL) {
         RegCloseKey(hKey);
         return ERROR_OUTOFMEMORY;
     }
 
+    // 读取完整数据到缓冲区
     result = RegQueryValueExW(hKey, REG_VALUE_NAME, NULL, &type, data, &dataSize);
     if (result != ERROR_SUCCESS) {
         free(data);
@@ -184,6 +189,7 @@ LONG ReadRegistryData(BYTE** buffer, DWORD* size)
         return result;
     }
 
+    // 将结果返回给调用方，由调用方负责释放
     *buffer = data;
     *size = dataSize;
 
@@ -200,11 +206,11 @@ LONG WriteRegistryData(const BYTE* buffer, DWORD size)
     result = RW_CreateRegKey(KEY_WRITE, &hKey);
     if (result != ERROR_SUCCESS) {
         if (result == ERROR_ACCESS_DENIED) {
-            WPRINTF_RED0(L"[错误] 权限不足：请以管理员身份运行本程序。\n");
+            WPRINTF_RED0(L"[Error] 权限不足：请以管理员身份运行本程序。\n");
         } else if (result == ERROR_FILE_NOT_FOUND || result == ERROR_NO_MORE_ITEMS) {
-            WPRINTF_RED0(L"[错误] 注册表路径不存在，且无法创建（可能被杀软拦截）。\n");
+            WPRINTF_RED0(L"[Error] 注册表路径不存在，且无法创建（可能被杀软拦截）。\n");
         } else {
-            WPRINTF_RED(L"[错误] 打开注册表失败，错误码：%lu\n", result);
+            WPRINTF_RED(L"[Error] 打开注册表失败，错误码：%lu\n", result);
         }
         return result;
     }
@@ -224,27 +230,27 @@ LONG WriteRegistryData(const BYTE* buffer, DWORD size)
         if (result == ERROR_SUCCESS) {
             if (verifySize != size || memcmp(verifyBuf, buffer, size) != 0) {
                 free(verifyBuf);
-                WPRINTF_RED0(L"[错误] 写入验证失败：数据不匹配（可能被杀软拦截）。\n");
+                WPRINTF_RED0(L"[Error] 写入验证失败：数据不匹配（可能被杀软拦截）。\n");
                 return ERROR_INTERNAL_ERROR;
             }
             free(verifyBuf);
         } else if (size == 0 && result == ERROR_FILE_NOT_FOUND) {
             /* 删除操作验证通过 */
         } else {
-            WPRINTF_RED(L"[错误] 写入验证失败：无法读回数据（错误码：%lu）\n", result);
+            WPRINTF_RED(L"[Error] 写入验证失败：无法读回数据（错误码：%lu）\n", result);
             return result;
         }
     } else {
         if (result == ERROR_ACCESS_DENIED) {
-            WPRINTF_RED0(L"[错误] 写入被拒绝：可能是权限不足或被杀软拦截。\n");
+            WPRINTF_RED0(L"[Error] 写入被拒绝：可能是权限不足或被杀软拦截。\n");
             wprintf(L"       建议：以管理员身份运行，并将本程序加入杀软白名单。\n");
         } else if (result == ERROR_SHARING_VIOLATION) {
-            WPRINTF_RED0(L"[错误] 写入失败：注册表正被其他进程占用。\n");
+            WPRINTF_RED0(L"[Error] 写入失败：注册表正被其他进程占用。\n");
             wprintf(L"       请关闭相关程序后重试。\n");
         } else if (result == ERROR_NOT_ENOUGH_MEMORY) {
-            WPRINTF_RED0(L"[错误] 写入失败：系统内存不足。\n");
+            WPRINTF_RED0(L"[Error] 写入失败：系统内存不足。\n");
         } else {
-            WPRINTF_RED(L"[错误] 写入失败，错误码：%lu\n", result);
+            WPRINTF_RED(L"[Error] 写入失败，错误码：%lu\n", result);
         }
     }
 
@@ -266,7 +272,7 @@ LONG BackupData(const BYTE* data, DWORD size, wchar_t** path)
         return ERROR_OUTOFMEMORY;
     }
 
-    swprintf_s(backupPath, MAX_PATH, L"%sRebootWipe_%d.tmp", tempDir, GetTickCount());
+    swprintf_s(backupPath, MAX_PATH, L"%sRebootWipe_%d.tmp", tempDir, GetTickCount64());
 
     hFile = CreateFileW(backupPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                         FILE_ATTRIBUTE_NORMAL, NULL);
@@ -301,12 +307,14 @@ LONG ParseMultiSzData(const BYTE* data, DWORD size,
     int opCount = 0;
     int capacity = 16;
 
+    // 空数据处理：直接返回空数组
     if (data == NULL || size == 0) {
         *operations = NULL;
         *count = 0;
         return ERROR_SUCCESS;
     }
 
+    // 初始分配 16 个操作槽位，不足时动态扩容
     ops = (PendingOperation*)malloc(capacity * sizeof(PendingOperation));
     if (ops == NULL) {
         return ERROR_OUTOFMEMORY;
@@ -316,12 +324,14 @@ LONG ParseMultiSzData(const BYTE* data, DWORD size,
     ptr = (const wchar_t*)data;
     end = (const wchar_t*)(data + size);
 
+    // 主循环：每次迭代解析一个操作条目（源路径 + 可选目标路径）
     while (ptr < end) {
         const wchar_t *srcStart, *srcEnd;
         const wchar_t *dstStart, *dstEnd;
         size_t srcLen, dstLen;
         PendingOperation* op;
 
+        // 步骤 1：定位源路径（找到下一个 \0 结尾）
         srcStart = ptr;
         srcEnd = ptr;
         while (srcEnd < end && *srcEnd != L'\0') {
@@ -336,6 +346,7 @@ LONG ParseMultiSzData(const BYTE* data, DWORD size,
             continue;
         }
 
+        // 步骤 2：必要时动态扩容操作数组
         if (opCount >= capacity) {
             capacity *= 2;
             PendingOperation* newOps = (PendingOperation*)realloc(ops, capacity * sizeof(PendingOperation));
@@ -350,10 +361,12 @@ LONG ParseMultiSzData(const BYTE* data, DWORD size,
         op = &ops[opCount];
         opCount++;
 
+        // 步骤 3：拷贝源路径（限制 MAX_PATH_LEN 防止溢出）
         if (srcLen >= MAX_PATH_LEN) srcLen = MAX_PATH_LEN - 1;
         wcsncpy_s(op->sourcePath, MAX_PATH_LEN, srcStart, srcLen);
         op->sourcePath[srcLen] = L'\0';
 
+        // 步骤 4：检测 ?? 前缀 → 标记为"已跳过"并去除前缀
         if (srcLen >= SKIP_PREFIX_LEN &&
             op->sourcePath[0] == L'?' && op->sourcePath[1] == L'?') {
             size_t newLen = srcLen - SKIP_PREFIX_LEN;
@@ -364,6 +377,7 @@ LONG ParseMultiSzData(const BYTE* data, DWORD size,
             srcLen = newLen;
         }
 
+        // 步骤 5：检测 *NN 前缀（旧版跳过标记），去除数字部分
         if (srcLen >= 2 && op->sourcePath[0] == L'*') {
             size_t skipLen = 1;
             while (skipLen < srcLen &&
@@ -380,6 +394,7 @@ LONG ParseMultiSzData(const BYTE* data, DWORD size,
             }
         }
 
+        // 步骤 6：去除长路径前缀 \\?\，将 \\?\C:\path 还原为 C:\path
         if (srcLen >= 4 && op->sourcePath[0] == L'\\' &&
             op->sourcePath[1] == L'?' && op->sourcePath[2] == L'?' &&
             op->sourcePath[3] == L'\\') {
@@ -391,7 +406,9 @@ LONG ParseMultiSzData(const BYTE* data, DWORD size,
 
         ptr = srcEnd + 1;
 
+        // 步骤 7：判断下一个字符串是目标路径（移动操作）还是分隔符（删除操作）
         if (ptr < end && *ptr != L'\0') {
+            // 存在目标路径 → 移动/重命名操作
             dstStart = ptr;
             dstEnd = ptr;
             while (dstEnd < end && *dstEnd != L'\0') {
@@ -403,22 +420,26 @@ LONG ParseMultiSzData(const BYTE* data, DWORD size,
             wcsncpy_s(op->targetPath, MAX_PATH_LEN, dstStart, dstLen);
             op->targetPath[dstLen] = L'\0';
 
+            // 已跳过的条目不改变类型
             if (op->type != OP_SKIPPED) {
                 op->type = OP_MOVE;
             }
 
             ptr = dstEnd + 1;
         } else {
+            // 无目标路径 → 删除操作
             if (op->type != OP_SKIPPED) {
                 op->type = OP_DELETE;
             }
         }
 
+        // 步骤 8：跳过条目间的 \0 分隔符
         if (ptr < end && *ptr == L'\0') {
             ptr++;
         }
     }
 
+    // 返回解析结果
     *operations = ops;
     *count = opCount;
     return ERROR_SUCCESS;
