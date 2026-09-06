@@ -40,7 +40,7 @@ void ResetConsoleColor(void)
     SetConsoleColor(g_originalAttrs);
 }
 
-// 使用 Win32 API 安全清屏（FillConsoleOutputCharacter + SetConsoleCursorPosition）
+// 使用Win32API安全清屏
 void ClearConsole(void)
 {
     HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -206,9 +206,9 @@ LONG WriteRegistryData(const BYTE* buffer, DWORD size)
     result = RW_CreateRegKey(KEY_WRITE, &hKey);
     if (result != ERROR_SUCCESS) {
         if (result == ERROR_ACCESS_DENIED) {
-            WPRINTF_RED0(L"[Error] 权限不足：请以管理员身份运行本程序。\n");
+            WPRINTF_RED0(L"[Error] 权限不足：请以管理员身份运行本程序\n");
         } else if (result == ERROR_FILE_NOT_FOUND || result == ERROR_NO_MORE_ITEMS) {
-            WPRINTF_RED0(L"[Error] 注册表路径不存在，且无法创建（可能被杀软拦截）。\n");
+            WPRINTF_RED0(L"[Error] 注册表路径不存在，且无法创建（可能被杀软拦截）\n");
         } else {
             WPRINTF_RED(L"[Error] 打开注册表失败，错误码：%lu\n", result);
         }
