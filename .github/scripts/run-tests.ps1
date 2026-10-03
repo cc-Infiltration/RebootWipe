@@ -21,7 +21,7 @@ param(
     [string]$LogFile = "$env:GITHUB_WORKSPACE\test-results.log"
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 
 # Skip UAC self-elevation (this script is already running elevated)
 $env:CI = "true"
@@ -60,9 +60,6 @@ function Invoke-ExeSafe {
         [Parameter(Mandatory=$false)] [string]$StdinInput   # text to pipe via stdin (for erase confirm)
     )
 
-    # PowerShell Start-Process -RedirectStandardOutput/Error writes raw bytes
-    # straight to disk without going through PS's ANSI decoder — this preserves
-    # RebootWipe.exe's _O_U16TEXT (UTF-16 LE) output verbatim.
     if ($StdinInput) {
         $stdinFile = Join-Path $tmpDir "stdin_$($script:total).txt"
         Set-Content -Path $stdinFile -Value $StdinInput -NoNewline -Encoding ASCII
@@ -70,18 +67,22 @@ function Invoke-ExeSafe {
         $stdinFile = $null
     }
 
-    $spArgs = @{
-        FilePath              = $Exe
-        ArgumentList          = $Args
-        RedirectStandardOutput = $OutFile
-        RedirectStandardError  = $ErrFile
-        Wait                  = $true
-        NoNewWindow           = $false
-    }
-    if ($stdinFile) { $spArgs.RedirectStandardInput = $stdinFile }
+    try {
+        $spArgs = @{
+            FilePath               = $Exe
+            ArgumentList           = $Args
+            RedirectStandardOutput = $OutFile
+            RedirectStandardError  = $ErrFile
+            Wait                   = $true
+        }
+        if ($stdinFile) { $spArgs.RedirectStandardInput = $stdinFile }
 
-    $proc = Start-Process @spArgs -PassThru
-    return $proc.ExitCode
+        $proc = Start-Process @spArgs -PassThru
+        return $proc.ExitCode
+    } catch {
+        Write-Host "Invoke-ExeSafe error: $($_.Exception.Message)" 2>&1 | Tee-Object -Append $LogFile
+        return 999
+    }
 }
 
 function Write-CapturedOutput {
