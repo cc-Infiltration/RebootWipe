@@ -31,26 +31,34 @@ jobs:
           Write-Host "Build succeeded."
         shell: powershell
 
-      - name: Verify Build Output
+      - name: Locate Build Output
+        id: locate-exe
         run: |
-          $exePath = ".\RebootWipe\x64\Release\RebootWipe.exe"
-          if (-not (Test-Path $exePath)) {
-              Write-Error "Build output not found at $exePath"
+          $exe = Get-ChildItem -Path . -Recurse -Filter "RebootWipe.exe" -ErrorAction Stop |
+                 Where-Object { $_.FullName -match "Release" } |
+                 Select-Object -First 1
+          if (-not $exe) {
+              Write-Error "找不到 Release 构建输出 RebootWipe.exe"
               exit 1
           }
-          $size = (Get-Item $exePath).Length
-          Write-Host "Binary found: $exePath ($size bytes)"
+          Write-Host "Found: $($exe.FullName) ($($exe.Length) bytes)"
+          echo "exe_path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
         shell: powershell
 
       - name: Run Tests (Elevated)
         run: |
-          $exePath = Resolve-Path ".\RebootWipe\x64\Release\RebootWipe.exe"
+          $exePath = "${{ steps.locate-exe.outputs.exe_path }}"
           $scriptPath = Resolve-Path ".\.github\scripts\run-tests.ps1"
           $logFile = Join-Path $env:GITHUB_WORKSPACE "test-results.log"
 
           Write-Host "Exe: $exePath"
           Write-Host "Script: $scriptPath"
           Write-Host "Log: $logFile"
+
+          if (-not (Test-Path $exePath)) {
+              Write-Error "Executable not found at $exePath"
+              exit 1
+          }
 
           $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
@@ -86,5 +94,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: RebootWipe-win-x64
-          path: RebootWipe/x64/Release/RebootWipe.exe
+          path: ${{ steps.locate-exe.outputs.exe_path }}
           if-no-files-found: error
