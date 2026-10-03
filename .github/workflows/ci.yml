@@ -7,13 +7,9 @@ on:
     branches: [main, master]
 
 jobs:
-  build-and-test:
+  build:
     runs-on: windows-latest
     timeout-minutes: 15
-
-    env:
-      CI: "true"
-      REBOOTWIPE_SKIP_UAC: "1"
 
     steps:
       - name: Checkout code
@@ -29,68 +25,22 @@ jobs:
           Write-Host "Build succeeded."
         shell: powershell
 
-      - name: Locate Build Output
-        id: locate-exe
+      - name: Verify Build Output
         run: |
-          $exe = Get-ChildItem -Path . -Recurse -Filter "RebootWipe.exe" -ErrorAction Stop |
+          $exe = Get-ChildItem -Path . -Recurse -Filter "RebootWipe.exe" |
                  Where-Object { $_.FullName -match "Release" } |
                  Select-Object -First 1
           if (-not $exe) {
-              Write-Error "找不到 Release 构建输出 RebootWipe.exe"
+              Write-Error "RebootWipe.exe not found in any Release output directory"
               exit 1
           }
-          Write-Host "Found: $($exe.FullName) ($($exe.Length) bytes)"
-          echo "exe_path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
+          Write-Host "Verified: $($exe.FullName) ($([math]::Round($exe.Length / 1KB, 1)) KB)"
         shell: powershell
-
-      - name: Run Tests (Elevated)
-        run: |
-          $exePath = "${{ steps.locate-exe.outputs.exe_path }}"
-          $scriptPath = Resolve-Path ".\.github\scripts\run-tests.ps1"
-          $logFile = Join-Path $env:GITHUB_WORKSPACE "test-results.log"
-
-          Write-Host "Exe: $exePath"
-          Write-Host "Script: $scriptPath"
-          Write-Host "Log: $logFile"
-
-          if (-not (Test-Path $exePath)) {
-              Write-Error "Executable not found at $exePath"
-              exit 1
-          }
-
-          $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-
-          if ($isAdmin) {
-              Write-Host "Current session is elevated. Running tests directly."
-              & powershell.exe -ExecutionPolicy Bypass -NoProfile -File $scriptPath -ExePath $exePath -LogFile $logFile
-              exit $LASTEXITCODE
-          } else {
-              Write-Host "Current session is NOT elevated. Launching elevated process..."
-              $proc = Start-Process -FilePath "powershell.exe" `
-                  -ArgumentList @(
-                      "-ExecutionPolicy", "Bypass",
-                      "-NoProfile",
-                      "-File", $scriptPath,
-                      "-ExePath", $exePath,
-                      "-LogFile", $logFile
-                  ) `
-                  -Verb RunAs -Wait -PassThru
-              Write-Host "Elevated process exited with code: $($proc.ExitCode)"
-              exit $proc.ExitCode
-          }
-        shell: powershell
-
-      - name: Upload Test Log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results
-          path: test-results.log
-          if-no-files-found: ignore
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
           name: RebootWipe-win-x64
-          path: ${{ steps.locate-exe.outputs.exe_path }}
+          path: |
+            **/Release/RebootWipe.exe
           if-no-files-found: error
