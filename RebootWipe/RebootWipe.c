@@ -43,15 +43,26 @@ int wmain(int argc, wchar_t* argv[])
     /* 保存原始控制台颜色，用于错误输出后恢复 */
     SaveConsoleColor();
 
-    /* 自动提权：如果不是管理员，请求 UAC 提升 */
-    if (!IsAdministrator()) {
-        wprintf(L"[info] 正在请求管理员权限...\n");
-        if (RunAsAdmin(argc, argv)) {
-            /* 提权成功，退出当前进程 */
-            return 0;
-        } else {
-            WPRINTF_RED0(L"[错误] 无法获取管理员权限，程序将继续运行但部分功能可能受限。\n");
-            wprintf(L"       建议：右键点击程序，选择「以管理员身份运行」。\n\n");
+    /* CI/无交互模式：检测到 CI 环境变量时跳过自动 UAC 提权 */
+    {
+        const char* ciEnv = getenv("CI");
+        const char* skipUac = getenv("REBOOTWIPE_SKIP_UAC");
+        BOOL isCI = (ciEnv != NULL && ciEnv[0] != L'\0');
+        BOOL forceSkip = (skipUac != NULL && (skipUac[0] == '1' || skipUac[0] == 't' || skipUac[0] == 'T'));
+
+        if (isCI || forceSkip) {
+            wprintf(L"[info] CI 环境 / 跳过提权模式，不执行自动 UAC 提升。\n");
+            wprintf(L"       请确保运行本程序的账户已具备管理员权限。\n\n");
+        } else if (!IsAdministrator()) {
+            /* 自动提权：如果不是管理员，请求 UAC 提升 */
+            wprintf(L"[info] 正在请求管理员权限...\n");
+            if (RunAsAdmin(argc, argv)) {
+                /* 提权成功，退出当前进程 */
+                return 0;
+            } else {
+                WPRINTF_RED0(L"[错误] 无法获取管理员权限，程序将继续运行但部分功能可能受限。\n");
+                wprintf(L"       建议：右键点击程序，选择「以管理员身份运行」。\n\n");
+            }
         }
     }
 

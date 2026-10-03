@@ -2,6 +2,8 @@
 
 **Windows 重启文件操作管理器** — 管理 `PendingFileRenameOperations` 注册表项，安全地安排文件在系统重启后删除。
 
+![CI](https://github.com/cc-Infiltration/RebootWipe/actions/workflows/ci.yml/badge.svg)
+[![Version](https://img.shields.io/badge/version-1.1.0-brightgreen.svg)]()
 [![Language](https://img.shields.io/badge/language-C-blue.svg)](https://learn.microsoft.com/en-us/cpp/c-language)
 [![Platform](https://img.shields.io/badge/platform-Windows-lightgray.svg)](https://www.microsoft.com/windows)
 [![License](https://img.shields.io/badge/license-GPL--3.0-orange.svg)](https://www.gnu.org/licenses/gpl-3.0)
@@ -164,6 +166,47 @@ Windows 注册表 `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager` 下的
 - 对 `PendingFileRenameOperations` 的操作**直接影响系统重启行为**，请谨慎操作
 - 建议在执行抹除操作前确认备份文件已正确生成
 - 远程共享路径不支持 `MOVEFILE_DELAY_UNTIL_REBOOT`
+
+## 🧪 CI / 无交互模式
+
+程序会自动检测环境变量跳过 UAC 提权，适用于自动化测试和 CI 场景：
+
+| 环境变量 | 值 | 效果 |
+|----------|---|------|
+| `CI` | 任意非空值 | 自动跳过 UAC 提权（GitHub Actions 默认设置） |
+| `REBOOTWIPE_SKIP_UAC` | `1` / `true` | 强制跳过 UAC 提权 |
+
+> ⚠️ 跳过 UAC 后，写注册表仍需要管理员权限。CI 会通过提升后的子进程执行实际测试。
+
+## 📝 更新日志
+
+### v1.1.0 (2026-10-03)
+
+#### ✨ 新增
+
+- **GitHub Actions CI 自动化测试流水线**
+  - Windows runner + MSBuild Release x64 构建
+  - 10 个命令行测试用例（help / read / add / skip / erase 等）
+  - 自动提升管理员权限执行注册表操作测试
+  - 测试日志和二进制 artifact 上传
+- **CI 模式下跳过 UAC 自动提权**
+  - 检测 `CI` 和 `REBOOTWIPE_SKIP_UAC` 环境变量
+  - 解决自动化场景中"打开即退出"的问题
+  - 交互式运行行为不变
+
+#### 🛠 工程改进
+
+- `.gitignore` 补充 `*.user` 规则
+- 从版本库中移除本地用户配置文件 `RebootWipe.vcxproj.user`
+
+### v1.0.0 (初始版本)
+
+- 交互式 / 命令行双模式
+- 查看 / 添加 / 跳过 / 抹除四种操作
+- UAC 自动提权
+- 目录递归展开（后序遍历）
+- 批量文件导入（`@文件` 语法）
+- 安全机制：写后验证、自动备份、重解析点检测
 
 ---
 ## 📄 许可证

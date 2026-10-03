@@ -1,0 +1,207 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    env:
+      CI: "true"
+      REBOOTWIPE_SKIP_UAC: "1"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+        with:
+          msbuild-version: "17.0"
+
+      - name: Build Release x64
+        run: |
+          msbuild RebootWipe.slnx /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "Build succeeded."
+        shell: powershell
+
+      - name: Verify Build Output
+        run: |
+          $exePath = ".\RebootWipe\x64\Release\RebootWipe.exe"
+          if (-not (Test-Path $exePath)) {
+              Write-Error "Build output not found at $exePath"
+              exit 1
+          }
+          $size = (Get-Item $exePath).Length
+          Write-Host "Binary found: $exePath ($size bytes)"
+        shell: powershell
+
+      - name: Run Tests (Elevated)
+        run: |
+          $exePath = Resolve-Path ".\RebootWipe\x64\Release\RebootWipe.exe"
+          $workDir = $GITHUB_WORKSPACE
+          $logFile = Join-Path $workDir "test-results.log"
+
+          # Check if current session is admin
+          $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+          if (-not $isAdmin) {
+              Write-Host "Current session is NOT elevated. Re-launching with admin privileges..."
+              
+              # Build test script to run elevated
+              $testScript = @"
+`$env:CI = "true"
+`$env:REBOOTWIPE_SKIP_UAC = "1"
+`$exe = "$exePath"
+`$log = "$logFile"
+`$workDir = "$workDir"
+
+Set-Location `$workDir
+
+Write-Host "=== RebootWipe Command-Line Tests ===" 2>&1 | Tee-Object `$log
+Write-Host "Current user: `$(whoami)" 2>&1 | Tee-Object -Append `$log
+Write-Host "Is admin: `$([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)" 2>&1 | Tee-Object -Append `$log
+Write-Host "" 2>&1 | Tee-Object -Append `$log
+
+`$failures = 0
+`$total = 0
+
+function Run-Test {
+    param([string]`$name, [string[]]`$args, [int]`$expectedCode = 0)
+    `$script:total++
+    Write-Host "--- Test `$script:total`: `$name ---" 2>&1 | Tee-Object -Append `$log
+    Write-Host "Command: `$exe `$(`$args -join ' ')" 2>&1 | Tee-Object -Append `$log
+    `$out = & `$exe @args 2>&1 | Tee-Object -Append `$log
+    `$code = `$LASTEXITCODE
+    Write-Host "Exit code: `$code (expected: `$expectedCode)" 2>&1 | Tee-Object -Append `$log
+    if (`$code -ne `$expectedCode) {
+        Write-Host "[FAIL] `$name - exit code mismatch" 2>&1 | Tee-Object -Append `$log
+        `$script:failures++
+    } else {
+        Write-Host "[PASS] `$name" 2>&1 | Tee-Object -Append `$log
+    }
+    Write-Host "" 2>&1 | Tee-Object -Append `$log
+}
+
+# Test 1: help command
+Run-Test "help command" -args @("help") -expectedCode 0
+
+# Test 2: help flag
+Run-Test "help flag -h" -args @("-h") -expectedCode 1
+
+# Test 3: read current pending operations
+Run-Test "read pending ops" -args @("read") -expectedCode 0
+
+# Test 4: Invalid command
+Run-Test "invalid command" -args @("invalidcmd") -expectedCode 1
+
+# Create temp test file for add test
+`$tempFile = Join-Path `$env:TEMP "RebootWipeTest_`$PID.tmp"
+"test content" | Out-File -FilePath `$tempFile -Encoding ASCII
+Write-Host "Created temp file: `$tempFile" 2>&1 | Tee-Object -Append `$log
+
+# Test 5: add temp file to delete list (requires admin)
+Run-Test "add temp file" -args @("add", `$tempFile) -expectedCode 0
+
+# Test 6: verify read shows the added file
+Run-Test "read after add" -args @("read") -expectedCode 0
+
+# Test 7: skip first entry
+Run-Test "skip entry 1" -args @("skip", "1") -expectedCode 0
+
+# Test 8: erase first entry (physical delete from registry)
+Run-Test "erase entry 1" -args @("erase", "1") -expectedCode 0
+
+# Test 9: read after operations
+Run-Test "read after erase" -args @("read") -expectedCode 0
+
+# Test 10: add non-existent file (should skip gracefully)
+Run-Test "add non-existent file" -args @("add", "C:\\__RebootWipe_NoSuchFile_12345__.tmp") -expectedCode -1
+
+Write-Host "=== Test Summary ===" 2>&1 | Tee-Object -Append `$log
+Write-Host "Total: `$total, Failures: `$failures" 2>&1 | Tee-Object -Append `$log
+
+# Cleanup temp file
+if (Test-Path `$tempFile) { Remove-Item `$tempFile -Force }
+
+if (`$failures -gt 0) { exit 1 }
+exit 0
+"@
+
+              $testScriptPath = Join-Path $workDir "run-tests.ps1"
+              Set-Content -Path $testScriptPath -Value $testScript -Encoding UTF8
+              
+              Write-Host "Launching elevated test process..."
+              $proc = Start-Process -FilePath "powershell.exe" `
+                  -ArgumentList @("-ExecutionPolicy", "Bypass", "-NoProfile", "-File", $testScriptPath) `
+                  -Verb RunAs -Wait -PassThru
+                  
+              exit $proc.ExitCode
+          } else {
+              # Already admin - run inline tests directly
+              Write-Host "Already running as Administrator. Running tests directly..."
+              
+              $failures = 0
+              $total = 0
+              
+              function Run-Test {
+                  param([string]$name, [string[]]$args, [int]$expectedCode = 0)
+                  $script:total++
+                  Write-Host "--- Test $script:total`: $name ---"
+                  Write-Host "Command: $exePath $($args -join ' ')"
+                  & $exePath @args
+                  $code = $LASTEXITCODE
+                  Write-Host "Exit code: $code (expected: $expectedCode)"
+                  if ($code -ne $expectedCode) {
+                      Write-Host "[FAIL] $name - exit code mismatch"
+                      $script:failures++
+                  } else {
+                      Write-Host "[PASS] $name"
+                  }
+              }
+              
+              Run-Test "help command" @("help") 0
+              Run-Test "help flag -h" @("-h") 1
+              Run-Test "read pending ops" @("read") 0
+              Run-Test "invalid command" @("invalidcmd") 1
+              
+              $tempFile = Join-Path $env:TEMP "RebootWipeTest_$PID.tmp"
+              "test content" | Out-File -FilePath $tempFile -Encoding ASCII
+              Write-Host "Created temp file: $tempFile"
+              
+              Run-Test "add temp file" @("add", $tempFile) 0
+              Run-Test "read after add" @("read") 0
+              Run-Test "skip entry 1" @("skip", "1") 0
+              Run-Test "erase entry 1" @("erase", "1") 0
+              Run-Test "read after erase" @("read") 0
+              Run-Test "add non-existent file" @("add", "C:\__RebootWipe_NoSuchFile_12345__.tmp") -1
+              
+              Write-Host "=== Test Summary ==="
+              Write-Host "Total: $total, Failures: $failures"
+              
+              if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
+              
+              if ($failures -gt 0) { exit 1 }
+          }
+        shell: powershell
+
+      - name: Upload Test Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results.log
+          if-no-files-found: ignore
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RebootWipe-win-x64
+          path: RebootWipe/x64/Release/RebootWipe.exe
+          if-no-files-found: error
