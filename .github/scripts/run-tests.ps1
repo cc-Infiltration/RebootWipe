@@ -60,38 +60,27 @@ function Invoke-ExeSafe {
         [Parameter(Mandatory=$false)] [string]$StdinInput   # text to pipe via stdin (for erase confirm)
     )
 
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $Exe
-    $psi.Arguments = $Args -join ' '
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
+    # PowerShell Start-Process -RedirectStandardOutput/Error writes raw bytes
+    # straight to disk without going through PS's ANSI decoder — this preserves
+    # RebootWipe.exe's _O_U16TEXT (UTF-16 LE) output verbatim.
     if ($StdinInput) {
-        $psi.RedirectStandardInput = $true
-    }
-    $psi.CreateNoWindow = $true
-
-    $proc = New-Object System.Diagnostics.Process
-    $proc.StartInfo = $psi
-    [void]$proc.Start()
-
-    if ($StdinInput) {
-        $proc.StandardInput.WriteLine($StdinInput)
-        $proc.StandardInput.Close()
+        $stdinFile = Join-Path $tmpDir "stdin_$($script:total).txt"
+        Set-Content -Path $stdinFile -Value $StdinInput -NoNewline -Encoding ASCII
+    } else {
+        $stdinFile = $null
     }
 
-    # Copy streams to files AFTER the process exits (simpler, no deadlocks)
-    $proc.WaitForExit()
+    $spArgs = @{
+        FilePath              = $Exe
+        ArgumentList          = $Args
+        RedirectStandardOutput = $OutFile
+        RedirectStandardError  = $ErrFile
+        Wait                  = $true
+        NoNewWindow           = $false
+    }
+    if ($stdinFile) { $spArgs.RedirectStandardInput = $stdinFile }
 
-    # Read captured output from streams and write to files
-    if (Test-Path $OutFile) { Remove-Item $OutFile -Force }
-    if (Test-Path $ErrFile) { Remove-Item $ErrFile -Force }
-
-    $stdoutBytes = $proc.StandardOutput.ReadToEnd()
-    $stderrBytes = $proc.StandardError.ReadToEnd()
-    [System.IO.File]::WriteAllText($OutFile, $stdoutBytes, [System.Text.Encoding]::Unicode)
-    [System.IO.File]::WriteAllText($ErrFile, $stderrBytes, [System.Text.Encoding]::Unicode)
-
+    $proc = Start-Process @spArgs -PassThru
     return $proc.ExitCode
 }
 
