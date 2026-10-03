@@ -4,10 +4,14 @@
 #
 # Design note: RebootWipe.exe outputs UTF-16 LE via _setmode(O_U16TEXT).
 # PowerShell 5.1 pipelines decode child-process stdout with the system ANSI
-# code page, which garbles all Unicode output (Chinese, box-drawing chars).
-# We use Start-Process with file-based stdout/stderr redirection to capture
-# raw bytes that never enter PowerShell's encoding pipeline. Exit code is
-# what matters for CI; raw output can be inspected from the artifact log.
+# code page, which garbles all Unicode output. We use Start-Process with
+# file-based stdout/stderr redirection to capture raw bytes that never enter
+# PowerShell's encoding pipeline.
+#
+# Exit code mapping (RebootWipe.c wmain):
+#   ParseCommand returns value X  ->  wmain returns  (X < 0 ? 1 : 0)
+#   So all non-negative ParseCommand results (0, 1, ...) map to exit 0.
+#   Only negative ParseCommand results (-1 specifically) map to exit 1.
 #
 param(
     [Parameter(Mandatory=$true)]
@@ -23,7 +27,7 @@ $ErrorActionPreference = "Stop"
 $env:CI = "true"
 $env:REBOOTWIPE_SKIP_UAC = "1"
 
-# Temp dir for per-test stdout/stderr captures
+# Temp dir for per-test stdout/stderr/stdin captures
 $tmpDir = Join-Path $env:TEMP "RebootWipeCI_$PID"
 New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
 
@@ -49,58 +53,64 @@ $total = 0
 
 function Invoke-ExeSafe {
     param(
-        [Parameter(Mandatory=$true)] [string]$Exe,
-        [Parameter(Mandatory=$true)] [string[]]$Args,
-        [Parameter(Mandatory=$true)] [string]$OutFile,
-        [Parameter(Mandatory=$true)] [string]$ErrFile
+        [Parameter(Mandatory=$true)]  [string]$Exe,
+        [Parameter(Mandatory=$true)]  [string[]]$Args,
+        [Parameter(Mandatory=$true)]  [string]$OutFile,
+        [Parameter(Mandatory=$true)]  [string]$ErrFile,
+        [Parameter(Mandatory=$false)] [string]$StdinInput   # text to pipe via stdin (for erase confirm)
     )
-    # Start-Process with RedirectStandardOutput/Error writes raw bytes to
-    # files without PowerShell encoding intervention. This preserves UTF-16 LE
-    # that RebootWipe.exe emits (Chinese + box-drawing Unicode characters).
-    $argStr = $Args -join ' '
+
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $Exe
-    $psi.Arguments = $argStr
+    $psi.Arguments = $Args -join ' '
     $psi.UseShellExecute = $false
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
+    if ($StdinInput) {
+        $psi.RedirectStandardInput = $true
+    }
     $psi.CreateNoWindow = $true
 
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $psi
     [void]$proc.Start()
+
+    if ($StdinInput) {
+        $proc.StandardInput.WriteLine($StdinInput)
+        $proc.StandardInput.Close()
+    }
+
+    # Copy streams to files AFTER the process exits (simpler, no deadlocks)
     $proc.WaitForExit()
+
+    # Read captured output from streams and write to files
+    if (Test-Path $OutFile) { Remove-Item $OutFile -Force }
+    if (Test-Path $ErrFile) { Remove-Item $ErrFile -Force }
+
+    $stdoutBytes = $proc.StandardOutput.ReadToEnd()
+    $stderrBytes = $proc.StandardError.ReadToEnd()
+    [System.IO.File]::WriteAllText($OutFile, $stdoutBytes, [System.Text.Encoding]::Unicode)
+    [System.IO.File]::WriteAllText($ErrFile, $stderrBytes, [System.Text.Encoding]::Unicode)
+
     return $proc.ExitCode
 }
 
 function Write-CapturedOutput {
     param(
-        [Parameter(Mandatory=$true)] [string]$OutFile,
-        [Parameter(Mandatory=$true)] [string]$ErrFile,
+        [Parameter(Mandatory=$true)]  [string]$OutFile,
+        [Parameter(Mandatory=$true)]  [string]$ErrFile,
         [Parameter(Mandatory=$false)] [string]$LogFile
     )
     if (-not $LogFile) { return }
-    # Try UTF-16 LE first (RebootWipe.exe output mode), then UTF-8 fallback
+
     foreach ($f in @($OutFile, $ErrFile)) {
-        if (Test-Path $f) {
-            try {
-                $bytes = [System.IO.File]::ReadAllBytes($f)
-                if ($bytes.Length -ge 2) {
-                    # Check UTF-16 LE BOM or plausible pattern
-                    $isUtf16 = ($bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) -or
-                               (($bytes.Length % 2 -eq 0) -and ($bytes | Select-Object -Index 1 -First 1) -eq 0)
-                    if ($isUtf16) {
-                        $text = [System.Text.Encoding]::Unicode.GetString($bytes)
-                    } else {
-                        $text = [System.Text.Encoding]::UTF8.GetString($bytes)
-                    }
-                    Add-Content -Path $LogFile -Value $text -Encoding UTF8
-                }
-            } catch {
-                # If anything fails, just dump raw line count
-                $lines = (Get-Content $f -ErrorAction SilentlyContinue | Measure-Object -Line).Lines
-                Add-Content -Path $LogFile -Value "[raw output: $lines lines, skipped decode]"
-            }
+        if (-not (Test-Path $f)) { continue }
+        try {
+            [void](Add-Content -Path $LogFile -Value "--- $([System.IO.Path]::GetFileName($f)) ---" -Encoding UTF8)
+            Get-Content -Path $f -Encoding Unicode -ErrorAction SilentlyContinue |
+                ForEach-Object { Add-Content -Path $LogFile -Value $_ -Encoding UTF8 }
+        } catch {
+            Add-Content -Path $LogFile -Value "[failed to decode $f]" -Encoding UTF8
         }
     }
 }
@@ -109,19 +119,20 @@ function Run-Test {
     param(
         [Parameter(Mandatory=$true)]  [string]$Name,
         [Parameter(Mandatory=$true)]  [string[]]$Args,
-        [Parameter(Mandatory=$false)] [int]$ExpectedCode = 0
+        [Parameter(Mandatory=$false)] [int]$ExpectedCode = 0,
+        [Parameter(Mandatory=$false)] [string]$StdinInput = $null
     )
 
     $script:total++
-    $outFile = Join-Path $tmpDir "test_${script:total}_out.bin"
-    $errFile = Join-Path $tmpDir "test_${script:total}_err.bin"
+    $outFile = Join-Path $tmpDir "test_${script:total}_out.txt"
+    $errFile = Join-Path $tmpDir "test_${script:total}_err.txt"
 
     Write-Host "--- Test $script:total : $Name ---" 2>&1 | Tee-Object -Append $LogFile
     Write-Host "Command : $ExePath $($Args -join ' ')" 2>&1 | Tee-Object -Append $LogFile
 
-    $actualCode = Invoke-ExeSafe -Exe $ExePath -Args $Args -OutFile $outFile -ErrFile $errFile
+    $actualCode = Invoke-ExeSafe -Exe $ExePath -Args $Args -OutFile $outFile -ErrFile $errFile -StdinInput $StdinInput
 
-    # Dump captured output into log for artifact inspection (best-effort decode)
+    # Dump captured output into log for artifact inspection
     Write-CapturedOutput -OutFile $outFile -ErrFile $errFile -LogFile $LogFile
 
     Write-Host "Exit    : $actualCode (expected: $ExpectedCode)" 2>&1 | Tee-Object -Append $LogFile
@@ -135,27 +146,33 @@ function Run-Test {
     Write-Host "" 2>&1 | Tee-Object -Append $LogFile
 }
 
-# === Test Suite ===
+# ======================================================================
+# Exit-code cheat-sheet (see RebootWipe.c -> wmain line 72):
+#   ParseCommand returns 0  -> wmain exit 0   (success)
+#   ParseCommand returns 1  -> wmain exit 0   (help shown / benign)
+#   ParseCommand returns -1 -> wmain exit 1   (any command failure)
+#   ParseCommand never returns negative other than -1
+# ======================================================================
 
-Run-Test "help command"              @("help")                    0
-Run-Test "help flag -h"              @("-h")                      1
-Run-Test "help flag /?"              @("/?")                      1
-Run-Test "read pending ops"          @("read")                    0
-Run-Test "invalid command"           @("invalidcmd_xyz")          1
+Run-Test "help command"              @("help")                  0
+Run-Test "help flag -h"              @("-h")                    0   # ParseCommand returns 1, wmain maps to 0
+Run-Test "help flag /?"              @("/?")                    0   # ParseCommand returns 1, wmain maps to 0
+Run-Test "read pending ops"          @("read")                  0
+Run-Test "invalid command"           @("invalidcmd_xyz")        1   # ParseCommand returns -1, wmain maps to 1
 
 # Temp file for add/skip/erase tests
 $tempFile = Join-Path $env:TEMP "RebootWipeCI_$PID.tmp"
 "test content for CI" | Out-File -FilePath $tempFile -Encoding ASCII
 Write-Host "Created temp file: $tempFile" 2>&1 | Tee-Object -Append $LogFile
 
-Run-Test "add temp file"             @("add", $tempFile)                    0
-Run-Test "read after add"            @("read")                              0
-Run-Test "skip first entry"          @("skip", "1")                         0
-Run-Test "erase first entry"         @("erase", "1")                        0
-Run-Test "read after erase"          @("read")                              0
-Run-Test "add non-existent file"     @("add", "C:\__RW_no_such_CI__.tmp")  -1
-Run-Test "skip invalid index 0"      @("skip", "0")                         -1
-Run-Test "erase invalid 999"         @("erase", "999")                      -1
+Run-Test "add temp file"             @("add", $tempFile)                     0
+Run-Test "read after add"            @("read")                               0
+Run-Test "skip first entry"          @("skip", "1")                          0
+Run-Test "erase first entry (confirm y)" @("erase", "1") 0 -StdinInput "y`n"  # erase needs interactive y/N
+Run-Test "read after erase"          @("read")                               0
+Run-Test "add non-existent file"     @("add", "C:\__RW_no_such_CI__.tmp")    1   # ParseCommand returns -1, wmain maps to 1
+Run-Test "skip invalid index 0"      @("skip", "0")                          1   # invalid index -> -1 -> 1
+Run-Test "erase invalid 999"         @("erase", "999")                       1   # out of range -> -1 -> 1
 
 # === Summary ===
 Write-Host "=== Test Summary ===" 2>&1 | Tee-Object -Append $LogFile
